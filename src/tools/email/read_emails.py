@@ -1,23 +1,11 @@
-import base64
-from typing import Optional
+import asyncio
 
-from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+from claude_agent_sdk import tool
 
 from src.utils.google_auth import get_gmail_service
 
 
-class ReadEmailsInput(BaseModel):
-    query: str = Field(
-        default="is:unread",
-        description="Gmail search query. String. Examples: 'is:unread', 'from:boss@example.com', 'subject:invoice'.",
-    )
-    max_results: int = Field(default=5, description="Maximum number of emails to return. Integer.")
-
-
-@tool(args_schema=ReadEmailsInput)
-def read_emails(query: str = "is:unread", max_results: int = 5) -> str:
-    """Search and read Gmail messages. Returns sender, subject, date, and a snippet of each."""
+def _read_emails(query: str, max_results: int) -> str:
     service = get_gmail_service()
     if not service:
         return "Gmail is not connected. The user needs to set up Google OAuth first."
@@ -53,3 +41,34 @@ def read_emails(query: str = "is:unread", max_results: int = 5) -> str:
 
     except Exception as e:
         return f"Error reading emails: {e}"
+
+
+READ_EMAILS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "Gmail search query. Examples: 'is:unread', 'from:boss@example.com', "
+                "'subject:invoice'. Default 'is:unread'."
+            ),
+        },
+        "max_results": {
+            "type": "integer",
+            "description": "Maximum number of emails to return. Default 5.",
+        },
+    },
+    "required": [],
+}
+
+
+@tool(
+    "read_emails",
+    "Search and read Gmail messages. Returns sender, subject, date, and a snippet of each.",
+    READ_EMAILS_SCHEMA,
+)
+async def read_emails(args: dict) -> dict:
+    query = args.get("query") or "is:unread"
+    max_results = args.get("max_results") or 5
+    result = await asyncio.to_thread(_read_emails, query, max_results)
+    return {"content": [{"type": "text", "text": result}]}

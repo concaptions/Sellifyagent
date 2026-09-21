@@ -1,26 +1,12 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
-from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+from claude_agent_sdk import tool
 
 from src.utils.google_auth import get_calendar_service
 
 
-class GetEventsInput(BaseModel):
-    days_ahead: int = Field(
-        default=7,
-        description="Number of days ahead to fetch events for. Integer, default 7.",
-    )
-    query: Optional[str] = Field(
-        default=None,
-        description="Optional search query to filter events by summary or description. String.",
-    )
-
-
-@tool(args_schema=GetEventsInput)
-def get_calendar_events(days_ahead: int = 7, query: str | None = None) -> str:
-    """Fetch upcoming Google Calendar events. Returns event summaries, times, and locations."""
+def _get_calendar_events(days_ahead: int, query: str | None) -> str:
     service = get_calendar_service()
     if not service:
         return "Google Calendar is not connected. The user needs to set up Google OAuth first."
@@ -64,3 +50,31 @@ def get_calendar_events(days_ahead: int = 7, query: str | None = None) -> str:
 
     except Exception as e:
         return f"Error fetching calendar events: {e}"
+
+
+GET_EVENTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "days_ahead": {
+            "type": "integer",
+            "description": "Number of days ahead to fetch events for. Default 7.",
+        },
+        "query": {
+            "type": "string",
+            "description": "Optional search query to filter events by summary or description.",
+        },
+    },
+    "required": [],
+}
+
+
+@tool(
+    "get_calendar_events",
+    "Fetch upcoming Google Calendar events. Returns event summaries, times, and locations.",
+    GET_EVENTS_SCHEMA,
+)
+async def get_calendar_events(args: dict) -> dict:
+    days_ahead = args.get("days_ahead") or 7
+    query = args.get("query") or None
+    result = await asyncio.to_thread(_get_calendar_events, days_ahead, query)
+    return {"content": [{"type": "text", "text": result}]}

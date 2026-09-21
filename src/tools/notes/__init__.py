@@ -1,3 +1,1 @@
-from src.tools.notes.manage_notes import get_notes, add_note, search_notes
-
-notes_tools = [get_notes, add_note, search_notes]
+from src.tools.notes.manage_notes import build_notes_tools, NOTES_TOOL_NAMES

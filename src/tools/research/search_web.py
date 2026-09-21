@@ -1,17 +1,11 @@
-from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+import asyncio
+
+from claude_agent_sdk import tool
 
 from src.config import TAVILY_API_KEY
 
 
-class SearchWebInput(BaseModel):
-    query: str = Field(description="The search query. String.")
-    max_results: int = Field(default=5, description="Maximum number of results. Integer.")
-
-
-@tool(args_schema=SearchWebInput)
-def search_web(query: str, max_results: int = 5) -> str:
-    """Search the web for current information. Use for questions about recent events, facts, or anything not in the user's data."""
+def _search_web(query: str, max_results: int) -> str:
     if not TAVILY_API_KEY:
         return "Web search is not configured. TAVILY_API_KEY is required."
 
@@ -36,3 +30,28 @@ def search_web(query: str, max_results: int = 5) -> str:
 
     except Exception as e:
         return f"Error searching the web: {e}"
+
+
+SEARCH_WEB_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "description": "The search query."},
+        "max_results": {
+            "type": "integer",
+            "description": "Maximum number of results. Default 5.",
+        },
+    },
+    "required": ["query"],
+}
+
+
+@tool(
+    "search_web",
+    "Search the web for current information. Use for questions about recent events, facts, or anything not in the user's data.",
+    SEARCH_WEB_SCHEMA,
+)
+async def search_web(args: dict) -> dict:
+    query = args["query"]
+    max_results = args.get("max_results") or 5
+    result = await asyncio.to_thread(_search_web, query, max_results)
+    return {"content": [{"type": "text", "text": result}]}

@@ -3,7 +3,6 @@ import logging
 import os
 
 from fastapi import FastAPI, Form, Response
-from fastapi.responses import PlainTextResponse
 import uvicorn
 
 from src.agents.assistant import PersonalAssistant
@@ -43,28 +42,28 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
 
 async def _process_message(phone: str, message: str, whatsapp_from: str):
     try:
-        upsert_user(phone)
+        await asyncio.to_thread(upsert_user, phone)
     except Exception:
         logger.debug("User upsert skipped (no DB)")
 
     try:
-        save_chat_message(phone, "human", message)
+        await asyncio.to_thread(save_chat_message, phone, "human", message)
     except Exception:
         logger.debug("Chat save skipped (no DB)")
 
     try:
-        response = assistant.invoke(message, user_phone=phone)
+        response = await assistant.ainvoke(message, user_phone=phone)
     except Exception as e:
         logger.error("Assistant error: %s", e)
         response = "Something went wrong. Please try again."
 
     try:
-        save_chat_message(phone, "assistant", response)
+        await asyncio.to_thread(save_chat_message, phone, "assistant", response)
     except Exception:
         logger.debug("Chat save skipped (no DB)")
 
     try:
-        whatsapp.send_message(whatsapp_from, response)
+        await asyncio.to_thread(whatsapp.send_message, whatsapp_from, response)
         logger.info("Reply sent to %s: %s", phone, response[:100])
     except Exception as e:
         logger.error("Failed to send reply to %s: %s", phone, e)
@@ -73,7 +72,7 @@ async def _process_message(phone: str, message: str, whatsapp_from: str):
 @app.post("/webhook/test")
 async def test_webhook(phone: str = Form("test"), message: str = Form(...)):
     """Test endpoint that returns the reply directly without sending via WhatsApp."""
-    response = assistant.invoke(message, user_phone=phone)
+    response = await assistant.ainvoke(message, user_phone=phone)
     return {"phone": phone, "reply": response}
 
 

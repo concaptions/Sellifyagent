@@ -1,22 +1,14 @@
+import asyncio
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+from claude_agent_sdk import tool
 
 from src.config import GMAIL_ADDRESS, GMAIL_APP_PASSWORD
 
 
-class SendEmailInput(BaseModel):
-    to: str = Field(description="Recipient email address. String.")
-    subject: str = Field(description="Email subject line. String.")
-    body: str = Field(description="Email body text. String.")
-
-
-@tool(args_schema=SendEmailInput)
-def send_email(to: str, subject: str, body: str) -> str:
-    """Send an email via Gmail SMTP. Call only when the user explicitly asks to send an email."""
+def _send_email(to: str, subject: str, body: str) -> str:
     if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
         return "Email sending is not configured. GMAIL_ADDRESS and GMAIL_APP_PASSWORD are required."
 
@@ -35,3 +27,24 @@ def send_email(to: str, subject: str, body: str) -> str:
 
     except Exception as e:
         return f"Error sending email: {e}"
+
+
+SEND_EMAIL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "to": {"type": "string", "description": "Recipient email address."},
+        "subject": {"type": "string", "description": "Email subject line."},
+        "body": {"type": "string", "description": "Email body text."},
+    },
+    "required": ["to", "subject", "body"],
+}
+
+
+@tool(
+    "send_email",
+    "Send an email via Gmail SMTP. Call only when the user explicitly asks to send an email.",
+    SEND_EMAIL_SCHEMA,
+)
+async def send_email(args: dict) -> dict:
+    result = await asyncio.to_thread(_send_email, args["to"], args["subject"], args["body"])
+    return {"content": [{"type": "text", "text": result}]}
