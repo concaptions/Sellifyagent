@@ -11,8 +11,8 @@ User's WhatsApp
       │
    FastAPI         (webhook server)
       │
-   Claude Agent SDK   (drives the Claude Code CLI — billed to this account's
-      │                own subscription, not a metered API key)
+   Claude Agent SDK   (drives Claude Code as a library; authenticated with a
+      │                real ANTHROPIC_API_KEY — see note below)
       │
    ┌─────────────────────────────────────┐
    │  Manager Agent (top-level, per turn) │
@@ -36,9 +36,9 @@ User's WhatsApp
 
 ### Why the Claude Agent SDK instead of a raw API client
 
-The SDK drives the same Claude Code CLI this development environment runs on, authenticated through the account's own login rather than a separate `ANTHROPIC_API_KEY`. That means usage is billed against the account's existing subscription/credits. It also gives us native multi-agent orchestration for free: `ClaudeAgentOptions.agents` defines named subagents with their own prompt and tool allow-list, and Claude delegates to them itself — no hand-rolled supervisor loop needed.
+The SDK is Claude Code packaged as a library, giving us native multi-agent orchestration for free: `ClaudeAgentOptions.agents` defines named subagents with their own prompt and tool allow-list, and Claude delegates to them itself via the built-in `Agent`/Task mechanism — no hand-rolled supervisor loop needed.
 
-**Deployment requirement:** the host running this app needs an authenticated Claude Code CLI session (run `claude login` once, or provision the equivalent credentials the CLI expects). There is no API key to put in `.env`.
+**Authentication:** this is a deployed third-party product, so it authenticates with a real `ANTHROPIC_API_KEY` from [platform.claude.com](https://platform.claude.com), set as a normal environment variable. (An earlier version of this doc assumed the SDK could ride on a developer's own claude.ai/Claude Code subscription login — that's explicitly against Anthropic's terms for a deployed product: *"Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK."* A metered API key is the only correct option here, and the SDK picks it up from the environment automatically — no other config needed.)
 
 ### Per-user isolation
 
@@ -65,30 +65,24 @@ cp .env.example .env
 # Fill in your API keys (Twilio, Google, Tavily, Postgres). No LLM API key needed.
 ```
 
-### 2. Claude Code CLI authentication
+### 2. Anthropic API key
 
-The Claude Agent SDK bundles and drives the Claude Code CLI. On the deployment host:
-
-```bash
-claude login
-```
-
-(or otherwise provision the credentials/config the CLI expects — see the Claude Agent SDK docs for headless/CI authentication options).
+Get a real API key from [platform.claude.com](https://platform.claude.com) and set it as `ANTHROPIC_API_KEY`. The Claude Agent SDK reads it from the environment automatically — no other setup needed (see the auth note above for why this is required rather than riding on a personal Claude login).
 
 ### 3. Google OAuth
 
-This app connects **one shared Google account** (Calendar + Gmail) for the whole assistant — not a separate account per WhatsApp user. Because the server is headless (no browser), it uses a web OAuth callback flow instead of the interactive `run_local_server()` flow:
+This app connects **one shared Google account** (Calendar + Gmail) for the whole assistant — not a separate account per WhatsApp user. Because the server is headless (no browser), it uses a web OAuth callback flow instead of the interactive `run_local_server()` flow, and reads the OAuth client config from environment variables rather than a `credentials.json` file (that file is never committed since it holds the client secret, so a deployed host wouldn't have it anyway):
 
 1. Create a project in [Google Cloud Console](https://console.cloud.google.com), enable the Calendar API and Gmail API
 2. Create an OAuth 2.0 client of type **Web application** (not Desktop — Desktop-type clients only accept loopback/oob redirects, which won't work here)
 3. Add `https://<your-deployed-domain>/oauth/google/callback` to that client's **Authorized redirect URIs**
-4. Download the client secret JSON, save it as `credentials.json` in the project root (structure: a top-level `"web"` key with `client_id`, `client_secret`, `auth_uri`, `token_uri`)
+4. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` from that OAuth client
 5. Set `PUBLIC_BASE_URL` in `.env`/your host's env vars to your deployed app's own public HTTPS URL (no trailing slash) — this is used to build the exact redirect URI, since guessing it from proxy headers is unreliable
-6. Once deployed, visit `https://<your-deployed-domain>/oauth/google/start` **once** in a real browser, sign in with the Google account you want connected, and approve. Tokens are saved to `token.json`; the token refresher logic in `google_auth.py` keeps them alive after that.
+6. Once deployed, visit `https://<your-deployed-domain>/oauth/google/start` **once** in a real browser, sign in with the Google account you want connected, and approve. Tokens are saved to `token.json` (path configurable via `GOOGLE_TOKEN_FILE`); the token refresher logic in `google_auth.py` keeps them alive after that.
 
-**Filesystem persistence:** `token.json` is written to local disk. On most PaaS hosts (including Railway) the filesystem is ephemeral across redeploys unless you attach a persistent volume — without one, a redeploy means re-visiting `/oauth/google/start` again. Attach a volume mounted at the project directory (or move token storage into Postgres, matching the pattern the existing Cue project already uses in `pa_users.profile`) if you want it to survive redeploys.
+**Filesystem persistence:** `token.json` is written to local disk by default. On most PaaS hosts the filesystem is ephemeral across redeploys unless you attach a persistent volume — without one, a redeploy means re-visiting `/oauth/google/start` again. Mount a volume and point `GOOGLE_TOKEN_FILE` at a path inside it (e.g. `/data/token.json`), or move token storage into Postgres (matching the pattern the existing Cue project uses in `pa_users.profile`), if you want it to survive redeploys.
 
-*(If you have a machine with a browser and just want to generate `token.json` locally first: run `python -c "from src.utils.google_auth import run_local_console_auth; run_local_console_auth()"` with a Desktop-type `credentials.json`, then copy the resulting `token.json` to the server.)*
+*(If you have a machine with a browser and want to generate `token.json` locally first using a Desktop-type OAuth client instead: download that client's JSON as `credentials.json`, then run `python -c "from src.utils.google_auth import run_local_console_auth; run_local_console_auth()"` and copy the resulting `token.json` to the server.)*
 
 ### 4. Twilio
 
@@ -105,9 +99,9 @@ pip install -r requirements.txt   # or let Railway install from requirements.txt
 This repo includes a `Procfile` (`web: uvicorn app:app --host 0.0.0.0 --port $PORT`) that Railway (or any Procfile-aware host) picks up automatically. Steps on Railway specifically:
 
 1. Connect this GitHub repo as a new Railway project
-2. Set environment variables from `.env` (Twilio, Gmail, Tavily, `DATABASE_URL`, `PUBLIC_BASE_URL`)
-3. Authenticate the Claude Code CLI for this deployment (see step 2 above) — how you do this depends on what headless-auth option the Claude Agent SDK supports for your plan; there's no `ANTHROPIC_API_KEY` fallback wired into this app
-4. Deploy, note the assigned `*.up.railway.app` domain, set it as `PUBLIC_BASE_URL`, and redeploy so that env var takes effect
+2. Add a PostgreSQL database service to the same project (Railway wires up its `DATABASE_URL` automatically; reference it on the web service as `${{Postgres.DATABASE_URL}}`)
+3. Set environment variables on the web service from `.env` (`ANTHROPIC_API_KEY`, Twilio, Gmail, `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, Tavily, `DATABASE_URL`)
+4. Generate a public domain for the web service, set it as `PUBLIC_BASE_URL` (redeploy so the env var takes effect)
 5. Visit `/oauth/google/start` once (see step 3 above)
 6. Point Twilio's webhook at `https://<that-domain>/whatsapp/webhook`
 

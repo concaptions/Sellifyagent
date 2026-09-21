@@ -6,6 +6,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 from googleapiclient.discovery import build
 
+from src.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+
 logger = logging.getLogger(__name__)
 
 SCOPES = [
@@ -14,8 +16,27 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
 ]
 
-_TOKEN_FILE = "token.json"
+# Configurable so a persistent volume can be mounted (e.g. /data/token.json)
+# on hosts with an ephemeral filesystem — otherwise a redeploy loses the
+# saved Google token and /oauth/google/start must be visited again.
+_TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
+
+# credentials.json is never committed (it holds the OAuth client secret), so
+# rather than requiring that file to exist on the deployed host, the client
+# config is built in-memory from env vars. from_client_config() takes the
+# exact same "web": {...} shape as the downloaded credentials.json.
 _CREDENTIALS_FILE = "credentials.json"
+
+
+def _client_config() -> dict:
+    return {
+        "web": {
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
 
 
 def get_google_credentials() -> Credentials | None:
@@ -53,7 +74,7 @@ def get_authorization_url(redirect_uri: str) -> str:
     InstalledAppFlow.run_local_server(), which requires a local browser and
     cannot work on a headless deployment.
     """
-    flow = Flow.from_client_secrets_file(_CREDENTIALS_FILE, scopes=SCOPES, redirect_uri=redirect_uri)
+    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
     auth_url, _state = flow.authorization_url(
         access_type="offline",
         prompt="consent",
@@ -68,7 +89,7 @@ def exchange_code_for_token(code: str, redirect_uri: str) -> None:
     used in get_authorization_url() and the one registered in Google Cloud
     Console for this OAuth client.
     """
-    flow = Flow.from_client_secrets_file(_CREDENTIALS_FILE, scopes=SCOPES, redirect_uri=redirect_uri)
+    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
     flow.fetch_token(code=code)
     with open(_TOKEN_FILE, "w") as f:
         f.write(flow.credentials.to_json())
