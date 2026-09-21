@@ -3,12 +3,14 @@ import logging
 import os
 
 from fastapi import FastAPI, Form, Response
+from fastapi.responses import PlainTextResponse, RedirectResponse
 import uvicorn
 
 from src.agents.assistant import PersonalAssistant
 from src.channels.whatsapp import WhatsAppChannel
-from src.config import PORT
+from src.config import PORT, PUBLIC_BASE_URL
 from src.database import init_database, upsert_user, save_chat_message
+from src.utils.google_auth import get_authorization_url, exchange_code_for_token
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,6 +81,39 @@ async def test_webhook(phone: str = Form("test"), message: str = Form(...)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+def _oauth_redirect_uri() -> str:
+    if not PUBLIC_BASE_URL:
+        raise RuntimeError(
+            "PUBLIC_BASE_URL is not set. Set it to this app's own public HTTPS "
+            "URL (e.g. https://your-app.up.railway.app) before using /oauth/google/start."
+        )
+    return f"{PUBLIC_BASE_URL}/oauth/google/callback"
+
+
+@app.get("/oauth/google/start")
+async def oauth_google_start():
+    """Visit this once (in a browser) to connect the shared Google account
+    (Calendar + Gmail) this assistant uses. Only needs to be done once per
+    token lifetime — the token refresher keeps it alive after that.
+    """
+    try:
+        auth_url = get_authorization_url(_oauth_redirect_uri())
+    except Exception as e:
+        logger.error("Failed to build Google auth URL: %s", e)
+        return PlainTextResponse(f"Could not start Google OAuth: {e}", status_code=500)
+    return RedirectResponse(auth_url)
+
+
+@app.get("/oauth/google/callback")
+async def oauth_google_callback(code: str):
+    try:
+        await asyncio.to_thread(exchange_code_for_token, code, _oauth_redirect_uri())
+    except Exception as e:
+        logger.error("Google OAuth callback failed: %s", e)
+        return PlainTextResponse(f"Google OAuth failed: {e}", status_code=500)
+    return PlainTextResponse("Google account connected. You can close this tab.")
 
 
 if __name__ == "__main__":

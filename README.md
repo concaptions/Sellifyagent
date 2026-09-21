@@ -77,26 +77,41 @@ claude login
 
 ### 3. Google OAuth
 
-1. Create a project in [Google Cloud Console](https://console.cloud.google.com)
-2. Enable Calendar API and Gmail API
-3. Create OAuth 2.0 credentials (Desktop app)
-4. Download `credentials.json` to the project root
-5. On first run, a browser window opens for auth — `token.json` is saved automatically
+This app connects **one shared Google account** (Calendar + Gmail) for the whole assistant — not a separate account per WhatsApp user. Because the server is headless (no browser), it uses a web OAuth callback flow instead of the interactive `run_local_server()` flow:
+
+1. Create a project in [Google Cloud Console](https://console.cloud.google.com), enable the Calendar API and Gmail API
+2. Create an OAuth 2.0 client of type **Web application** (not Desktop — Desktop-type clients only accept loopback/oob redirects, which won't work here)
+3. Add `https://<your-deployed-domain>/oauth/google/callback` to that client's **Authorized redirect URIs**
+4. Download the client secret JSON, save it as `credentials.json` in the project root (structure: a top-level `"web"` key with `client_id`, `client_secret`, `auth_uri`, `token_uri`)
+5. Set `PUBLIC_BASE_URL` in `.env`/your host's env vars to your deployed app's own public HTTPS URL (no trailing slash) — this is used to build the exact redirect URI, since guessing it from proxy headers is unreliable
+6. Once deployed, visit `https://<your-deployed-domain>/oauth/google/start` **once** in a real browser, sign in with the Google account you want connected, and approve. Tokens are saved to `token.json`; the token refresher logic in `google_auth.py` keeps them alive after that.
+
+**Filesystem persistence:** `token.json` is written to local disk. On most PaaS hosts (including Railway) the filesystem is ephemeral across redeploys unless you attach a persistent volume — without one, a redeploy means re-visiting `/oauth/google/start` again. Attach a volume mounted at the project directory (or move token storage into Postgres, matching the pattern the existing Cue project already uses in `pa_users.profile`) if you want it to survive redeploys.
+
+*(If you have a machine with a browser and just want to generate `token.json` locally first: run `python -c "from src.utils.google_auth import run_local_console_auth; run_local_console_auth()"` with a Desktop-type `credentials.json`, then copy the resulting `token.json` to the server.)*
 
 ### 4. Twilio
 
-1. Set up a [Twilio WhatsApp Sandbox](https://www.twilio.com/docs/whatsapp/sandbox)
-2. Point the webhook URL to `https://your-server/whatsapp/webhook`
-3. Add your Twilio credentials to `.env`
+1. Get a WhatsApp-enabled Twilio number (sandbox for testing, or a real approved sender for production)
+2. Point that number's webhook URL to `https://<your-deployed-domain>/whatsapp/webhook`
+3. Add your Twilio Account SID, Auth Token, and the WhatsApp number (as `whatsapp:+<number>`) to `.env`
 
-### 5. Install & Run
+### 5. Deploy (e.g. Railway)
 
 ```bash
-pip install -r requirements.txt
-python app.py
+pip install -r requirements.txt   # or let Railway install from requirements.txt automatically
 ```
 
-For development, expose with ngrok:
+This repo includes a `Procfile` (`web: uvicorn app:app --host 0.0.0.0 --port $PORT`) that Railway (or any Procfile-aware host) picks up automatically. Steps on Railway specifically:
+
+1. Connect this GitHub repo as a new Railway project
+2. Set environment variables from `.env` (Twilio, Gmail, Tavily, `DATABASE_URL`, `PUBLIC_BASE_URL`)
+3. Authenticate the Claude Code CLI for this deployment (see step 2 above) — how you do this depends on what headless-auth option the Claude Agent SDK supports for your plan; there's no `ANTHROPIC_API_KEY` fallback wired into this app
+4. Deploy, note the assigned `*.up.railway.app` domain, set it as `PUBLIC_BASE_URL`, and redeploy so that env var takes effect
+5. Visit `/oauth/google/start` once (see step 3 above)
+6. Point Twilio's webhook at `https://<that-domain>/whatsapp/webhook`
+
+For local development instead, run `python app.py` (auto-reloads) and expose it with ngrok:
 ```bash
 ngrok http 5000
 ```
@@ -128,7 +143,8 @@ This was verified end-to-end during development, including:
 ## Project Structure
 
 ```
-├── app.py                    # FastAPI entry point (WhatsApp webhook)
+├── app.py                    # FastAPI entry point (WhatsApp webhook + Google OAuth routes)
+├── Procfile                  # Railway/Heroku-style start command
 ├── src/
 │   ├── config.py             # Environment config
 │   ├── database.py           # Postgres operations
@@ -148,7 +164,7 @@ This was verified end-to-end during development, including:
 │   │   ├── notes/            # build_notes_tools(user_phone) factory (SDK @tool)
 │   │   └── research/         # search_web (Tavily, SDK @tool)
 │   └── utils/
-│       ├── google_auth.py    # Google OAuth flow
+│       ├── google_auth.py    # Google OAuth: web callback flow + token refresh
 │       └── message_splitter.py  # WhatsApp 1600-char limit handler
 ├── requirements.txt
 └── .env.example

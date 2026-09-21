@@ -17,3 +17,9 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 WHATSAPP_CHAR_LIMIT = 1600
 
 PORT = int(os.getenv("PORT", "5000"))
+
+# The app's own public HTTPS base URL once deployed (e.g.
+# "https://sellify-agent-production.up.railway.app"), no trailing slash.
+# Used to build a fixed Google OAuth redirect_uri rather than guessing it
+# from request headers, which is unreliable behind a reverse proxy.
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
