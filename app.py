@@ -10,7 +10,11 @@ from src.agents.assistant import PersonalAssistant
 from src.channels.whatsapp import WhatsAppChannel
 from src.config import PORT, PUBLIC_BASE_URL
 from src.database import init_database, upsert_user, save_chat_message
-from src.utils.google_auth import get_authorization_url, exchange_code_for_token
+from src.utils.google_auth import (
+    get_authorization_url,
+    exchange_code_for_token,
+    get_google_credentials,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,13 +111,47 @@ async def oauth_google_start():
 
 
 @app.get("/oauth/google/callback")
-async def oauth_google_callback(code: str):
+async def oauth_google_callback(code: str | None = None, error: str | None = None):
+    # Both params are optional on purpose. When Google refuses the request it
+    # redirects back with ?error=... and no ?code=..., so declaring code as
+    # required made FastAPI reject the callback with a bare 422 and swallow
+    # the reason Google actually gave — which is the one thing worth seeing.
+    if error:
+        logger.error("Google OAuth returned an error: %s", error)
+        return PlainTextResponse(
+            f"Google refused the authorization request: {error}\n\n"
+            f"redirect_uri used: {_oauth_redirect_uri()}\n"
+            "If this is redirect_uri_mismatch, that exact URI must be listed under "
+            "Authorized redirect URIs on this OAuth client in Google Cloud Console.",
+            status_code=400,
+        )
+    if not code:
+        return PlainTextResponse(
+            "Missing ?code. Start the flow at /oauth/google/start rather than "
+            "opening this URL directly.",
+            status_code=400,
+        )
     try:
         await asyncio.to_thread(exchange_code_for_token, code, _oauth_redirect_uri())
     except Exception as e:
         logger.error("Google OAuth callback failed: %s", e)
         return PlainTextResponse(f"Google OAuth failed: {e}", status_code=500)
     return PlainTextResponse("Google account connected. You can close this tab.")
+
+
+@app.get("/oauth/google/status")
+async def oauth_google_status():
+    """Report whether a usable Google token exists, so "is Calendar connected?"
+    can be answered by asking the app rather than by inferring it from whether
+    a tool call happened to fail.
+    """
+    creds = await asyncio.to_thread(get_google_credentials)
+    return {
+        "connected": creds is not None,
+        "token_file": os.getenv("GOOGLE_TOKEN_FILE", "token.json"),
+        "redirect_uri": _oauth_redirect_uri() if PUBLIC_BASE_URL else None,
+        "scopes": list(getattr(creds, "scopes", []) or []) if creds else [],
+    }
 
 
 if __name__ == "__main__":
