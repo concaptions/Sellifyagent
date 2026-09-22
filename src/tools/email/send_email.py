@@ -1,27 +1,33 @@
 import asyncio
-import smtplib
+import base64
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 from claude_agent_sdk import tool
 
-from src.config import GMAIL_ADDRESS, GMAIL_APP_PASSWORD
+from src.utils.google_auth import get_gmail_service
 
 
 def _send_email(to: str, subject: str, body: str) -> str:
-    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
-        return "Email sending is not configured. GMAIL_ADDRESS and GMAIL_APP_PASSWORD are required."
+    # Sends through the Gmail API using the same OAuth token read_emails uses
+    # (the gmail.send scope was requested alongside gmail.readonly/calendar
+    # specifically for this). This used to go over SMTP with a separate
+    # GMAIL_ADDRESS/GMAIL_APP_PASSWORD pair, which is a second credential to
+    # keep valid on top of the OAuth connection and rejects outright if that
+    # value isn't a real 16-character Google App Password (a regular account
+    # password, or an app password generated without 2FA on, fails the same
+    # way: SMTPAuthenticationError 535). Routing through the OAuth token
+    # instead means there's one Google connection for this whole app, not two.
+    service = get_gmail_service()
+    if not service:
+        return "Gmail is not connected. The user needs to set up Google OAuth first."
 
     try:
-        msg = MIMEMultipart()
-        msg["From"] = GMAIL_ADDRESS
+        msg = MIMEText(body)
         msg["To"] = to
         msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain"))
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-            server.send_message(msg)
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
 
         return f"Email sent to {to} with subject '{subject}'."
 
@@ -42,7 +48,7 @@ SEND_EMAIL_SCHEMA = {
 
 @tool(
     "send_email",
-    "Send an email via Gmail SMTP. Call only when the user explicitly asks to send an email.",
+    "Send an email via Gmail. Call only when the user explicitly asks to send an email.",
     SEND_EMAIL_SCHEMA,
 )
 async def send_email(args: dict) -> dict:
