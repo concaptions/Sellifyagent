@@ -111,7 +111,7 @@ async def oauth_google_start():
 
 
 @app.get("/oauth/google/callback")
-async def oauth_google_callback(code: str | None = None, error: str | None = None):
+async def oauth_google_callback(code: str | None = None, error: str | None = None, state: str | None = None):
     # Both params are optional on purpose. When Google refuses the request it
     # redirects back with ?error=... and no ?code=..., so declaring code as
     # required made FastAPI reject the callback with a bare 422 and swallow
@@ -132,7 +132,7 @@ async def oauth_google_callback(code: str | None = None, error: str | None = Non
             status_code=400,
         )
     try:
-        await asyncio.to_thread(exchange_code_for_token, code, _oauth_redirect_uri())
+        await asyncio.to_thread(exchange_code_for_token, code, _oauth_redirect_uri(), state)
     except Exception as e:
         logger.error("Google OAuth callback failed: %s", e)
         return PlainTextResponse(f"Google OAuth failed: {e}", status_code=500)

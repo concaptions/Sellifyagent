@@ -1,5 +1,7 @@
 import os
+import time
 import logging
+import threading
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -26,6 +28,46 @@ _TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 # config is built in-memory from env vars. from_client_config() takes the
 # exact same "web": {...} shape as the downloaded credentials.json.
 _CREDENTIALS_FILE = "credentials.json"
+
+# google-auth-oauthlib's Flow defaults autogenerate_code_verifier=True, so
+# authorization_url() silently turns on PKCE: it generates flow.code_verifier
+# and embeds the matching code_challenge in the URL sent to Google. That
+# verifier lives only on that one Flow instance in memory. /oauth/google/start
+# and /oauth/google/callback are separate HTTP requests that each build a
+# fresh Flow, so without carrying the verifier over, Google's token endpoint
+# rejects the exchange with "invalid_grant: Missing code verifier" — the
+# callback is presenting a code_verifier-less request against a
+# code_challenge that demands one. Stash it here keyed by the flow's `state`
+# (which round-trips through Google unchanged) so the callback can restore it
+# onto its own Flow before calling fetch_token(). A short-lived in-memory
+# store is enough: this is a one-time admin bootstrap flow, not per-message
+# traffic, and it only needs to survive the seconds between visiting /start
+# and Google redirecting back to /callback within the same running process.
+_PKCE_TTL_SECONDS = 600
+_pkce_lock = threading.Lock()
+_pkce_store: dict[str, tuple[str, float]] = {}
+
+
+def _save_code_verifier(state: str, code_verifier: str) -> None:
+    with _pkce_lock:
+        now = time.time()
+        stale = [k for k, (_, saved_at) in _pkce_store.items() if now - saved_at > _PKCE_TTL_SECONDS]
+        for k in stale:
+            del _pkce_store[k]
+        _pkce_store[state] = (code_verifier, now)
+
+
+def _pop_code_verifier(state: str | None) -> str | None:
+    if not state:
+        return None
+    with _pkce_lock:
+        entry = _pkce_store.pop(state, None)
+    if not entry:
+        return None
+    code_verifier, saved_at = entry
+    if time.time() - saved_at > _PKCE_TTL_SECONDS:
+        return None
+    return code_verifier
 
 
 def _client_config() -> dict:
@@ -75,21 +117,31 @@ def get_authorization_url(redirect_uri: str) -> str:
     cannot work on a headless deployment.
     """
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
-    auth_url, _state = flow.authorization_url(
+    auth_url, state = flow.authorization_url(
         access_type="offline",
         prompt="consent",
         include_granted_scopes="true",
     )
+    # See the PKCE comment above _pkce_store: this Flow just generated a
+    # code_verifier (PKCE is on by default) that the callback's separate
+    # Flow instance has no way to know about unless we hand it over.
+    if flow.code_verifier:
+        _save_code_verifier(state, flow.code_verifier)
     return auth_url
 
 
-def exchange_code_for_token(code: str, redirect_uri: str) -> None:
+def exchange_code_for_token(code: str, redirect_uri: str, state: str | None = None) -> None:
     """Complete the web OAuth flow: exchange the callback's code for tokens
     and persist them to token.json. redirect_uri must exactly match the one
     used in get_authorization_url() and the one registered in Google Cloud
-    Console for this OAuth client.
+    Console for this OAuth client. state should be the callback's ?state=
+    query param, used to restore the code_verifier get_authorization_url()
+    stashed for this same flow (see the PKCE comment above _pkce_store).
     """
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
+    code_verifier = _pop_code_verifier(state)
+    if code_verifier:
+        flow.code_verifier = code_verifier
     flow.fetch_token(code=code)
     with open(_TOKEN_FILE, "w") as f:
         f.write(flow.credentials.to_json())
