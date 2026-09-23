@@ -30,9 +30,9 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Name | ✅ Assistant introduces itself as **Cue** (manager prompt) |
 | Personal memory | ✅ `memory_agent` saves facts to `sellify_users.profile`; profile (+ Cue's `pa_users` name/timezone/core_prompt) injected into every turn; per-user timezone drives reminders. Live-verified 2026-09-23 (save without asking, recall, correction, reminder in user's tz) |
 | Cue's earlier documents | ⚠️ `documents_agent` lists/searches `pa_knowledge_chunks` (read-only) via `match_cue_knowledge`, keyed by `pa_users.id`. Live: no-history path verified; **real-user listing/search to be confirmed from the user's phone** (test scripts must not carry real numbers) |
-| Voice notes | ⚠️ `audio/*` media → Whisper (`OPENAI_TRANSCRIBE_MODEL`, default `whisper-1`) → `[Voice note, transcribed] …` in the message. **Live test pending** |
-| Photos (vision) | ⚠️ `image/*` media → PIL downscale ≤1568 px JPEG → base64 image block via SDK streaming input (`_user_turn_with_images`). **Live test pending** |
-| Image generation + charts | ⚠️ `images_agent`: `generate_image` (OpenAI `OPENAI_IMAGE_MODEL`, default `gpt-image-1`) and `render_chart` (matplotlib) → `/media/<token>.png` → attached as WhatsApp image. **Live test pending** |
+| Voice notes | ✅ `audio/*` media → Whisper (`OPENAI_TRANSCRIBE_MODEL`, default `whisper-1`) → `[Voice note, transcribed] …` in the message. Live-verified 2026-09-23 (flac sample; transcript recalled next turn) |
+| Photos (vision) | ✅ `image/*` media → PIL downscale ≤1568 px JPEG → base64 image block via SDK streaming input (`_user_turn_with_images`). Live-verified 2026-09-23 (described a public test photo) |
+| Image generation + charts | ✅ `images_agent`: `generate_image` (OpenAI `OPENAI_IMAGE_MODEL`, default `gpt-image-1`) and `render_chart` (matplotlib) → `/media/<token>.png` → attached as WhatsApp image. Live-verified 2026-09-23 (BP line chart 47 KB; generated poster 2.2 MB, both served) |
 | Google reconnect link | ✅ Google tools return `not_connected()` with a signed 30-min link `/oauth/google/start?t=…` (HMAC with `TEST_WEBHOOK_TOKEN`); `/start` without a valid token → 403. Unit-tested |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
 
@@ -196,7 +196,10 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 20. Image blocks can only reach `query()` through the streaming-input form (an async iterable of
     `{"type":"user","message":{"role":"user","content":[…]},"parent_tool_use_id":None,"session_id":"default"}`).
     `/oauth/google/start` is gated by a signed token because whoever completes it becomes the
-    shared Google account — never hand out the bare URL.
+    shared Google account — never hand out the bare URL. For live media tests use fixtures the
+    open internet serves to non-browsers: `raw.githubusercontent.com/openai/whisper/main/tests/jfk.flac`
+    (speech), `httpbin.org/image/jpeg` (photo); Wikimedia 403s and the UIC sound files are gone.
+    Generated images are large PNGs (~2 MB); WhatsApp's image cap is 5 MB.
 19. Supabase's `postgres` login is not a superuser: `SET ROLE` needs `GRANT role TO CURRENT_USER`,
     and RLS applies to every non-owner role (zero rows, no error) — hence the reader policy.
     Never bind parameters around model-written SQL (psycopg2 reads its `%` as placeholders).
@@ -220,7 +223,8 @@ subscription login is not allowed for a deployed product). Model is **not pinned
    widgets may need per-site handling; browser sessions and approvals are in-memory (lost on
    redeploy). Logged-in / payment bookings **still need explicit user decisions on credential
    storage, allowed sites — do not build on assumptions.**
-5. Document upload follow-ups: scanned PDFs via OCR/vision; per-tier storage caps; staleness
+5. Media follow-ups: PDF form filling (user asked live, not built); voice replies (TTS) if
+   wanted; convert generated PNGs to JPEG to shrink delivery. Document upload follow-ups: scanned PDFs via OCR/vision; per-tier storage caps; staleness
    nudges; when Canon promotion is built, Canon facts must store a source-document id so
    deleting a doc flags them; keep original files only if needed (private Supabase Storage).
 6. Cue feature parity: Canon/RAG read, personal log, personas, photo ingestion, per-user
