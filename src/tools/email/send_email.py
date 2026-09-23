@@ -4,7 +4,7 @@ from email.mime.text import MIMEText
 
 from claude_agent_sdk import tool
 
-from src.utils.google_auth import get_gmail_service
+from src.utils.google_auth import get_gmail_service, not_connected
 
 
 def _send_email(to: str, subject: str, body: str) -> str:
@@ -19,7 +19,7 @@ def _send_email(to: str, subject: str, body: str) -> str:
     # instead means there's one Google connection for this whole app, not two.
     service = get_gmail_service()
     if not service:
-        return "Gmail is not connected. The user needs to set up Google OAuth first."
+        return not_connected("Gmail")
 
     try:
         msg = MIMEText(body)

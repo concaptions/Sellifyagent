@@ -3,13 +3,13 @@ from datetime import datetime, timedelta, timezone
 
 from claude_agent_sdk import tool
 
-from src.utils.google_auth import get_calendar_service
+from src.utils.google_auth import get_calendar_service, not_connected
 
 
 def _get_calendar_events(days_ahead: int, query: str | None) -> str:
     service = get_calendar_service()
     if not service:
-        return "Google Calendar is not connected. The user needs to set up Google OAuth first."
+        return not_connected("Google Calendar")
 
     now = datetime.now(timezone.utc)
     time_max = now + timedelta(days=days_ahead)

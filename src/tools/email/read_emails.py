@@ -2,13 +2,13 @@ import asyncio
 
 from claude_agent_sdk import tool
 
-from src.utils.google_auth import get_gmail_service
+from src.utils.google_auth import get_gmail_service, not_connected
 
 
 def _read_emails(query: str, max_results: int) -> str:
     service = get_gmail_service()
     if not service:
-        return "Gmail is not connected. The user needs to set up Google OAuth first."
+        return not_connected("Gmail")
 
     try:
         result = service.users().messages().list(

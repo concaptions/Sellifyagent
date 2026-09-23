@@ -30,6 +30,10 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Name | ✅ Assistant introduces itself as **Cue** (manager prompt) |
 | Personal memory | ✅ `memory_agent` saves facts to `sellify_users.profile`; profile (+ Cue's `pa_users` name/timezone/core_prompt) injected into every turn; per-user timezone drives reminders. Live-verified 2026-09-23 (save without asking, recall, correction, reminder in user's tz) |
 | Cue's earlier documents | ⚠️ `documents_agent` lists/searches `pa_knowledge_chunks` (read-only) via `match_cue_knowledge`, keyed by `pa_users.id`. Live: no-history path verified; **real-user listing/search to be confirmed from the user's phone** (test scripts must not carry real numbers) |
+| Voice notes | ⚠️ `audio/*` media → Whisper (`OPENAI_TRANSCRIBE_MODEL`, default `whisper-1`) → `[Voice note, transcribed] …` in the message. **Live test pending** |
+| Photos (vision) | ⚠️ `image/*` media → PIL downscale ≤1568 px JPEG → base64 image block via SDK streaming input (`_user_turn_with_images`). **Live test pending** |
+| Image generation + charts | ⚠️ `images_agent`: `generate_image` (OpenAI `OPENAI_IMAGE_MODEL`, default `gpt-image-1`) and `render_chart` (matplotlib) → `/media/<token>.png` → attached as WhatsApp image. **Live test pending** |
+| Google reconnect link | ✅ Google tools return `not_connected()` with a signed 30-min link `/oauth/google/start?t=…` (HMAC with `TEST_WEBHOOK_TOKEN`); `/start` without a valid token → 403. Unit-tested |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
 
 ## Request flow
@@ -78,6 +82,10 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
 - `src/utils/documents.py` — media download (Twilio auth only to *.twilio.com), extract, chunk, embed, ingest
 - `src/utils/google_auth.py` — web OAuth flow, PKCE verifier store, token refresh
 - `src/utils/browser.py`, `src/utils/approvals.py`, `src/utils/media_store.py` — booking worker
+- `src/utils/media_ai.py` — transcribe (Whisper), prepare_image (PIL), generate_image (OpenAI), render_chart
+  (matplotlib), publish → `/media/`. `src/tools/images/` — `images_agent` tools.
+- `app.py` routes media by type: `audio/*` → `_transcribe_attachment`, `image/*` → `_prepare_photo`
+  (image blocks into `ainvoke(images=…)`), everything else → `_ingest_attachment` (documents).
 - `Dockerfile` (Playwright python image; Railway builds from it, Procfile unused) + `.dockerignore`
   (excludes `.env`, `token.json`, `credentials.json`)
 - `src/database.py` — Sellify's own tables `sellify_users`, `sellify_notes`, `sellify_chat_history`,
@@ -185,6 +193,10 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 17. Timezones are per user: `profile["timezone"]` (fact > Cue's `pa_users.timezone` > column
     default Asia/Singapore). `USER_TIMEZONE` in assistant.py is only the last-resort default.
     The dev is in Pakistan, the client in Singapore — never assume one timezone.
+20. Image blocks can only reach `query()` through the streaming-input form (an async iterable of
+    `{"type":"user","message":{"role":"user","content":[…]},"parent_tool_use_id":None,"session_id":"default"}`).
+    `/oauth/google/start` is gated by a signed token because whoever completes it becomes the
+    shared Google account — never hand out the bare URL.
 19. Supabase's `postgres` login is not a superuser: `SET ROLE` needs `GRANT role TO CURRENT_USER`,
     and RLS applies to every non-owner role (zero rows, no error) — hence the reader policy.
     Never bind parameters around model-written SQL (psycopg2 reads its `%` as placeholders).
@@ -234,6 +246,8 @@ subscription login is not allowed for a deployed product). Model is **not pinned
   double-fire). Document retrieval stays on-demand only (user decision).
 - 2026-09-23 Personal memory in `sellify_users.profile` (not `pa_users.profile`, which n8n still
   writes); Cue's earlier documents read in place from `pa_knowledge_chunks`, not migrated.
+- 2026-09-23 Voice/photo/image features use the existing OpenAI key (Whisper, gpt-image-1) and
+  Claude vision; no new vendor. Generated media is served from the app's own `/media/` store.
 - 2026-09-23 Business tables opened to owner numbers only (user request); enforcement is a
   Postgres role with SELECT on exactly three tables, not SQL parsing.
 - 2026-09-23 n8n Cue path switched off (Twilio subscription deleted, user decision); assistant

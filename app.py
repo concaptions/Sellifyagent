@@ -15,12 +15,13 @@ from src.config import PORT, PUBLIC_BASE_URL, TEST_WEBHOOK_TOKEN, TWILIO_AUTH_TO
 from src import database as db
 from src.database import init_database, upsert_user, save_chat_message
 from src.tools.reminders import next_due, user_tz
-from src.utils import documents, media_store
+from src.utils import documents, media_ai, media_store
 from src.utils.approvals import booking_gate
 from src.utils.google_auth import (
     get_authorization_url,
     exchange_code_for_token,
     get_google_credentials,
+    verify_link_token,
 )
 
 logging.basicConfig(
@@ -121,6 +122,33 @@ def _ingest_attachment(
     )
 
 
+def _transcribe_attachment(url: str, content_type: str) -> str:
+    """A voice note becomes text the agent reads as the user's words."""
+    try:
+        data, _ = documents.download_media(url)
+        text = media_ai.transcribe(data, content_type)
+    except (media_ai.MediaError, documents.DocumentError) as e:
+        return f"[Voice note: could not be transcribed because {e}. Ask the user to type it.]"
+    except Exception:
+        logger.exception("Voice note transcription failed")
+        return "[Voice note: could not be transcribed because of a system error. Ask the user to type it.]"
+    return f"[Voice note, transcribed] {text}"
+
+
+def _prepare_photo(url: str) -> tuple[str, tuple[str, str] | None]:
+    """A photo is shown to the model as an image block; the note tells it
+    one is attached so it looks rather than asks."""
+    try:
+        data, _ = documents.download_media(url)
+        media_type, b64 = media_ai.prepare_image(data)
+    except (media_ai.MediaError, documents.DocumentError) as e:
+        return f"[Photo: could not be read because {e}.]", None
+    except Exception:
+        logger.exception("Photo preparation failed")
+        return "[Photo: could not be read because of a system error.]", None
+    return "[Photo attached: look at the image included with this message.]", (media_type, b64)
+
+
 def _looks_like_filename(text: str) -> bool:
     return bool(re.fullmatch(r"[^\n/\\]{1,200}\.(pdf|docx|txt|csv)", text.strip(), re.IGNORECASE))
 
@@ -142,6 +170,33 @@ async def _prepare_message(phone: str, message: str) -> str:
     return f"{system_line}\n\n{message}" if system_line else message
 
 
+async def _attach_media(
+    phone: str, message: str, media: list[tuple[str, str]] | None, message_sid: str | None
+) -> tuple[str, list[tuple[str, str]]]:
+    """Turn attachments into what the agent sees: a system line per file,
+    voice notes as transcribed text, photos as image blocks."""
+    images: list[tuple[str, str]] = []
+    if not media:
+        return message, images
+    # WhatsApp sends a document's filename as the message body, and
+    # Twilio's media download often has no filename header, so the body
+    # is the only place the real name shows up.
+    caption_filename = message if len(media) == 1 and _looks_like_filename(message) else None
+    notes = []
+    for url, ctype in media:
+        kind = ctype.split(";")[0].strip().lower()
+        if kind.startswith("audio/"):
+            notes.append(await asyncio.to_thread(_transcribe_attachment, url, kind))
+        elif kind.startswith("image/"):
+            note, image = await asyncio.to_thread(_prepare_photo, url)
+            notes.append(note)
+            if image:
+                images.append(image)
+        else:
+            notes.append(await asyncio.to_thread(_ingest_attachment, phone, url, ctype, message_sid, caption_filename))
+    return "\n".join(notes) + ("\n\n" + message if message else ""), images
+
+
 async def _process_message(
     phone: str,
     message: str,
@@ -149,17 +204,7 @@ async def _process_message(
     media: list[tuple[str, str]] | None = None,
     message_sid: str | None = None,
 ):
-    if media:
-        # WhatsApp sends a document's filename as the message body, and
-        # Twilio's media download often has no filename header, so the body
-        # is the only place the real name shows up.
-        caption_filename = message if len(media) == 1 and _looks_like_filename(message) else None
-        notes = [
-            await asyncio.to_thread(_ingest_attachment, phone, url, ctype, message_sid, caption_filename)
-            for url, ctype in media
-        ]
-        message = "\n".join(notes) + ("\n\n" + message if message else "")
-
+    message, images = await _attach_media(phone, message, media, message_sid)
     message = await _prepare_message(phone, message)
 
     try:
@@ -174,7 +219,7 @@ async def _process_message(
 
     typing = asyncio.create_task(_keep_typing(message_sid)) if message_sid else None
     try:
-        response = await assistant.ainvoke(message, user_phone=phone)
+        response = await assistant.ainvoke(message, user_phone=phone, images=images)
     except Exception as e:
         logger.error("Assistant error: %s", e)
         response = "Something went wrong. Please try again."
@@ -281,15 +326,20 @@ async def _deliver_reminder(reminder: dict):
 @app.post("/webhook/test")
 async def test_webhook(
     phone: str = Form("test"),
-    message: str = Form(...),
+    message: str = Form(""),
+    media_url: str = Form(""),
+    media_type: str = Form(""),
     x_test_token: str = Header(""),
 ):
     """Runs the agent as `phone` and returns the reply without WhatsApp.
-    Requires the X-Test-Token header: it can act as any user."""
+    Requires the X-Test-Token header: it can act as any user. media_url +
+    media_type attach one file the way an inbound WhatsApp message would."""
     if not TEST_WEBHOOK_TOKEN or x_test_token != TEST_WEBHOOK_TOKEN:
         raise HTTPException(status_code=404)
+    media = [(media_url, media_type)] if media_url else None
+    message, images = await _attach_media(phone, message, media, None)
     message = await _prepare_message(phone, message)
-    response = await assistant.ainvoke(message, user_phone=phone)
+    response = await assistant.ainvoke(message, user_phone=phone, images=images)
     return {"phone": phone, "reply": response}
 
 
@@ -308,11 +358,18 @@ def _oauth_redirect_uri() -> str:
 
 
 @app.get("/oauth/google/start")
-async def oauth_google_start():
+async def oauth_google_start(t: str | None = None):
     """Visit this once (in a browser) to connect the shared Google account
     (Calendar + Gmail) this assistant uses. Only needs to be done once per
     token lifetime — the token refresher keeps it alive after that.
+    Needs the signed, short-lived token Cue hands out over WhatsApp, since
+    whoever completes this flow becomes the connected account.
     """
+    if not verify_link_token(t):
+        return PlainTextResponse(
+            "This reconnect link is missing or has expired. Ask Cue on WhatsApp to reconnect Google and use the fresh link it sends.",
+            status_code=403,
+        )
     try:
         auth_url = get_authorization_url(_oauth_redirect_uri())
     except Exception as e:

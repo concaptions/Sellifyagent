@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import uuid
+from collections.abc import AsyncIterable, AsyncIterator
 from datetime import datetime, timezone
 
 from claude_agent_sdk import (
@@ -21,6 +22,8 @@ from src.prompts.reminders_agent import REMINDERS_AGENT_PROMPT
 from src.prompts.browser_agent import BROWSER_AGENT_PROMPT
 from src.prompts.memory_agent import MEMORY_AGENT_PROMPT
 from src.prompts.data_agent import DATA_AGENT_PROMPT
+from src.prompts.images_agent import IMAGES_AGENT_PROMPT
+from src.tools.images import image_tools, IMAGE_TOOL_NAMES
 from src.config import BUSINESS_DATA_PHONES
 from src.tools.calendar import calendar_tools, CALENDAR_TOOL_NAMES
 from src.tools.email import email_tools, EMAIL_TOOL_NAMES
@@ -48,11 +51,28 @@ RESEARCH_TOOL_NAMES = ["WebSearch", "WebFetch"]
 ALL_TOOL_NAMES = (
     CALENDAR_TOOL_NAMES + EMAIL_TOOL_NAMES + NOTES_TOOL_NAMES + RESEARCH_TOOL_NAMES + DOCUMENT_TOOL_NAMES
     + REMINDER_TOOL_NAMES + BROWSER_TOOL_NAMES + MEMORY_TOOL_NAMES + DATA_TOOL_NAMES + BUSINESS_TOOL_NAMES
+    + IMAGE_TOOL_NAMES
 )
 
 
+async def _user_turn_with_images(text: str, images: list[tuple[str, str]]) -> AsyncIterator[dict]:
+    """The SDK's streaming-input form of a single user message, which is the
+    only way to send image blocks through query()."""
+    content: list[dict] = [
+        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+        for media_type, data in images
+    ]
+    content.append({"type": "text", "text": text})
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": None,
+        "session_id": "default",
+    }
+
+
 class PersonalAssistant:
-    """Wires a Claude Agent SDK manager agent with nine specialist subagents.
+    """Wires a Claude Agent SDK manager agent with ten specialist subagents.
 
     Authenticates with the ANTHROPIC_API_KEY in the environment (metered API
     usage); a deployed product may not run on a claude.ai subscription login.
@@ -108,6 +128,7 @@ class PersonalAssistant:
             "browser": create_sdk_mcp_server("browser", tools=browser_tools),
             "memory": create_sdk_mcp_server("memory", tools=memory_tools),
             "data": create_sdk_mcp_server("data", tools=data_tools),
+            "images": create_sdk_mcp_server("images", tools=image_tools),
         }
 
         agents = {
@@ -146,6 +167,11 @@ class PersonalAssistant:
                 prompt=DATA_AGENT_PROMPT.format(**format_kwargs),
                 tools=DATA_TOOL_NAMES + (BUSINESS_TOOL_NAMES if owner else []),
             ),
+            "images_agent": AgentDefinition(
+                description="Makes pictures: generates an image from a description, or draws a line/bar chart from numbers.",
+                prompt=IMAGES_AGENT_PROMPT.format(current_time=current_time),
+                tools=IMAGE_TOOL_NAMES,
+            ),
             "memory_agent": AgentDefinition(
                 description="Saves, updates and recalls what is known about the user: name, age, weight, family, preferences, timezone.",
                 prompt=MEMORY_AGENT_PROMPT.format(current_time=current_time),
@@ -172,7 +198,9 @@ class PersonalAssistant:
             env={"CLAUDE_CODE_SESSION_ID": ""},
         )
 
-    async def ainvoke(self, message: str, user_phone: str) -> str:
+    async def ainvoke(self, message: str, user_phone: str, images: list[tuple[str, str]] | None = None) -> str:
+        """images: (media_type, base64) photos the user attached; they go to
+        the model as image blocks alongside the text."""
         lock = self._locks.setdefault(user_phone, asyncio.Lock())
         async with lock:
             try:
@@ -183,8 +211,12 @@ class PersonalAssistant:
             options = self._build_options(user_phone, profile)
             result_text = ""
 
+            prompt: str | AsyncIterable[dict] = message
+            if images:
+                prompt = _user_turn_with_images(message, images)
+
             try:
-                async for msg in query(prompt=message, options=options):
+                async for msg in query(prompt=prompt, options=options):
                     if isinstance(msg, ResultMessage):
                         if msg.result:
                             result_text = msg.result

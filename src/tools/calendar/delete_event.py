@@ -2,13 +2,13 @@ import asyncio
 
 from claude_agent_sdk import tool
 
-from src.utils.google_auth import get_calendar_service
+from src.utils.google_auth import get_calendar_service, not_connected
 
 
 def _delete_calendar_event(event_id: str) -> str:
     service = get_calendar_service()
     if not service:
-        return "Google Calendar is not connected."
+        return not_connected("Google Calendar")
 
     try:
         service.events().delete(calendarId="primary", eventId=event_id).execute()
