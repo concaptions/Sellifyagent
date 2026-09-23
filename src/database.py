@@ -109,6 +109,10 @@ def init_database():
         init_document_tables()
     except Exception as e:
         logger.warning("Document tables not initialized: %s", e)
+    try:
+        init_business_reader()
+    except Exception as e:
+        logger.warning("Business reader role not set up (business data tools will refuse): %s", e)
 
 
 def init_document_tables():
@@ -394,6 +398,132 @@ def search_canon(cue_user_id: str, query: str, query_embedding: list[float] | No
                 (cue_user_id, f"%{query}%", limit),
             )
         return [dict(r) for r in cur.fetchall()]
+
+
+# --- Cue's per-user records (read-only, keyed by pa_users.id) ----------------
+
+def list_cue_logs(cue_user_id: str, kind: str | None, days: int, limit: int) -> list[dict]:
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT kind, logged_at, value_num, data, note, source FROM pa_logs
+               WHERE user_id = %s::uuid AND (%s::text IS NULL OR kind = %s)
+                 AND logged_at >= NOW() - (%s || ' days')::interval
+               ORDER BY logged_at DESC LIMIT %s""",
+            (cue_user_id, kind, kind, str(int(days)), limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def list_cue_personas(cue_user_id: str) -> list[dict]:
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT name, slug, description, LENGTH(content)::int AS chars FROM pa_personas
+               WHERE user_id = %s::uuid ORDER BY name""",
+            (cue_user_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def get_cue_persona(cue_user_id: str, slug: str) -> dict | None:
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT name, slug, description, content FROM pa_personas WHERE user_id = %s::uuid AND slug = %s",
+            (cue_user_id, slug),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def list_cue_reminders(cue_user_id: str, status: str | None, limit: int) -> list[dict]:
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT title, notes, due_at, status, fired_at, recurrence FROM pa_reminders
+               WHERE user_id = %s::uuid AND (%s::text IS NULL OR status = %s)
+               ORDER BY due_at DESC LIMIT %s""",
+            (cue_user_id, status, status, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def search_cue_chat_history(phone: str, query: str, limit: int) -> list[dict]:
+    """Cue's n8n memory is keyed 'pa-<phone>'; each row is one LangChain message."""
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT message->>'type' AS role, message->>'content' AS content, created_at
+               FROM n8n_chat_histories
+               WHERE session_id = %s AND message->>'content' ILIKE %s
+               ORDER BY created_at DESC LIMIT %s""",
+            (f"pa-{phone}", f"%{query}%", limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+# --- Business tables (owner-only, read-only) -----------------------------------
+# leads / products / documents belong to the client's WhatsApp sales bot and
+# aren't keyed by user. Access is gated per phone in the tool layer, and
+# read-only-ness is enforced by Postgres itself: queries run as a role that
+# can only SELECT from these three tables, inside a READ ONLY transaction,
+# so no amount of clever SQL from the model reaches pa_users or writes.
+BUSINESS_TABLES = ("leads", "products", "documents")
+READER_ROLE = "sellify_reader"
+
+
+def init_business_reader() -> None:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (READER_ROLE,))
+        if not cur.fetchone():
+            cur.execute(f"CREATE ROLE {READER_ROLE} NOLOGIN")
+        cur.execute(f"GRANT USAGE ON SCHEMA public TO {READER_ROLE}")
+    # One grant per table, each in its own transaction, so a table that
+    # doesn't exist (a dev database) doesn't take the others down with it.
+    for table in BUSINESS_TABLES:
+        try:
+            with get_db() as conn:
+                conn.cursor().execute(f"GRANT SELECT ON {table} TO {READER_ROLE}")
+        except Exception as e:
+            logger.warning("No read grant on %s: %s", table, e)
+
+
+def describe_business_tables() -> dict[str, list[str]]:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT table_name, column_name, data_type FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = ANY(%s)
+                 AND column_name <> 'embedding'
+               ORDER BY table_name, ordinal_position""",
+            (list(BUSINESS_TABLES),),
+        )
+        out: dict[str, list[str]] = {}
+        for table, col, typ in cur.fetchall():
+            out.setdefault(table, []).append(f"{col} ({typ})")
+        return out
+
+
+def run_business_query(sql: str, limit: int = 50) -> list[dict]:
+    body = sql.strip().rstrip(";").strip()
+    if ";" in body:
+        raise ValueError("One statement only.")
+    if not body.lower().startswith(("select", "with")):
+        raise ValueError("Only SELECT queries are allowed.")
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        conn.set_session(readonly=True, autocommit=False)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(f"SET LOCAL ROLE {READER_ROLE}")
+        cur.execute("SET LOCAL statement_timeout = 10000")
+        cur.execute(f"SELECT * FROM ({body}) AS q LIMIT %s", (limit,))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.rollback()
+        return rows
+    finally:
+        conn.close()
 
 
 def get_user(phone: str) -> dict | None:

@@ -26,6 +26,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # anyone read any user's notes and documents. Unset = endpoint disabled.
 TEST_WEBHOOK_TOKEN = os.getenv("TEST_WEBHOOK_TOKEN", "")
 
+# Phone numbers (comma-separated, E.164) allowed to query the business tables
+# (leads, products, documents). Those tables aren't keyed by user, so without
+# this gate anyone who texts the number could read the client's customer
+# list. Unset = nobody.
+BUSINESS_DATA_PHONES = {p.strip() for p in os.getenv("BUSINESS_DATA_PHONES", "").split(",") if p.strip()}
+
 WHATSAPP_CHAR_LIMIT = 1600
 
 PORT = int(os.getenv("PORT", "5000"))

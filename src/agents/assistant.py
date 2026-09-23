@@ -20,6 +20,8 @@ from src.prompts.documents_agent import DOCUMENTS_AGENT_PROMPT
 from src.prompts.reminders_agent import REMINDERS_AGENT_PROMPT
 from src.prompts.browser_agent import BROWSER_AGENT_PROMPT
 from src.prompts.memory_agent import MEMORY_AGENT_PROMPT
+from src.prompts.data_agent import DATA_AGENT_PROMPT
+from src.config import BUSINESS_DATA_PHONES
 from src.tools.calendar import calendar_tools, CALENDAR_TOOL_NAMES
 from src.tools.email import email_tools, EMAIL_TOOL_NAMES
 from src.tools.notes import build_notes_tools, NOTES_TOOL_NAMES
@@ -27,6 +29,7 @@ from src.tools.documents import build_document_tools, DOCUMENT_TOOL_NAMES
 from src.tools.reminders import build_reminder_tools, REMINDER_TOOL_NAMES
 from src.tools.browser import build_browser_tools, BROWSER_TOOL_NAMES
 from src.tools.memory import build_memory_tools, MEMORY_TOOL_NAMES
+from src.tools.data import build_data_tools, DATA_TOOL_NAMES, BUSINESS_TOOL_NAMES
 from src.tools.memory.profile import format_profile
 from src import database as db
 
@@ -44,12 +47,12 @@ RESEARCH_TOOL_NAMES = ["WebSearch", "WebFetch"]
 
 ALL_TOOL_NAMES = (
     CALENDAR_TOOL_NAMES + EMAIL_TOOL_NAMES + NOTES_TOOL_NAMES + RESEARCH_TOOL_NAMES + DOCUMENT_TOOL_NAMES
-    + REMINDER_TOOL_NAMES + BROWSER_TOOL_NAMES + MEMORY_TOOL_NAMES
+    + REMINDER_TOOL_NAMES + BROWSER_TOOL_NAMES + MEMORY_TOOL_NAMES + DATA_TOOL_NAMES + BUSINESS_TOOL_NAMES
 )
 
 
 class PersonalAssistant:
-    """Wires a Claude Agent SDK manager agent with eight specialist subagents.
+    """Wires a Claude Agent SDK manager agent with nine specialist subagents.
 
     Authenticates with the ANTHROPIC_API_KEY in the environment (metered API
     usage); a deployed product may not run on a claude.ai subscription login.
@@ -93,6 +96,8 @@ class PersonalAssistant:
         reminder_tools = build_reminder_tools(user_phone, user_timezone)
         browser_tools = build_browser_tools(user_phone)
         memory_tools = build_memory_tools(user_phone)
+        owner = user_phone in BUSINESS_DATA_PHONES
+        data_tools = build_data_tools(user_phone, profile.get("cue_user_id"), owner)
 
         mcp_servers = {
             "calendar": create_sdk_mcp_server("calendar", tools=calendar_tools),
@@ -102,6 +107,7 @@ class PersonalAssistant:
             "reminders": create_sdk_mcp_server("reminders", tools=reminder_tools),
             "browser": create_sdk_mcp_server("browser", tools=browser_tools),
             "memory": create_sdk_mcp_server("memory", tools=memory_tools),
+            "data": create_sdk_mcp_server("data", tools=data_tools),
         }
 
         agents = {
@@ -134,6 +140,11 @@ class PersonalAssistant:
                 description="Schedules, lists and cancels reminders and timed follow-ups for the user.",
                 prompt=REMINDERS_AGENT_PROMPT.format(**format_kwargs),
                 tools=REMINDER_TOOL_NAMES,
+            ),
+            "data_agent": AgentDefinition(
+                description="Answers from the database: the user's earlier records (health log, personas, past reminders, past chats) and, for owners, the business tables (leads, products, knowledge base).",
+                prompt=DATA_AGENT_PROMPT.format(**format_kwargs),
+                tools=DATA_TOOL_NAMES + (BUSINESS_TOOL_NAMES if owner else []),
             ),
             "memory_agent": AgentDefinition(
                 description="Saves, updates and recalls what is known about the user: name, age, weight, family, preferences, timezone.",

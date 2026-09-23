@@ -25,7 +25,8 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Web search | ✅ Claude Code built-in `WebSearch`/`WebFetch` (no Tavily key); live-verified 2026-09-23 (same-day headline with source URL; page fetch) |
 | Reminders + proactive follow-ups | ✅ `sellify_reminders` + `reminders_agent` + 60 s scheduler; live-verified 2026-09-23 via `/webhook/test`. Repeating reminders: min every 10 min, created only after the user OKs the schedule, every message carries "Reply *stop*", and "stop" is handled in `app.py` code. **Not yet fired to a real phone** |
 | Booking worker (browser) | ✅ `browser_agent` + Playwright (Dockerfile on Playwright image). Guest bookings only; login/password/card fields blocked in code; final click locked until the user's own "yes" (`src/utils/approvals.py`); screenshot proof via `/media/<token>.png`. Live-verified 2026-09-23 on httpbin's form: fill → approval question + screenshot → "no" declines → "yes" submits → result screenshot served |
-| Typing indicator | ⚠️ `_keep_typing` in `app.py` calls Twilio's typing-indicator API (public beta) every 20 s during a turn; deployed, **not yet seen working from a real phone** (needs a real inbound MessageSid) |
+| Typing indicator | ✅ `_keep_typing` in `app.py` calls Twilio's typing-indicator API (public beta) every 20 s during a turn; 200 OK on real messages 2026-09-23 |
+| Database Q&A (`data_agent`) | ⚠️ Per-user Cue records (`pa_logs`, `pa_personas`, `pa_reminders`, `n8n_chat_histories` keyed `pa-<phone>`) for everyone; business tables (`leads`, `products`, `documents`) **only for phones in `BUSINESS_DATA_PHONES`** (Railway env var, unset = nobody), read-only via Postgres role `sellify_reader` + READ ONLY txn. Local tests pass; **live test pending; user must set `BUSINESS_DATA_PHONES`** |
 | Name | ✅ Assistant introduces itself as **Cue** (manager prompt) |
 | Personal memory | ✅ `memory_agent` saves facts to `sellify_users.profile`; profile (+ Cue's `pa_users` name/timezone/core_prompt) injected into every turn; per-user timezone drives reminders. Live-verified 2026-09-23 (save without asking, recall, correction, reminder in user's tz) |
 | Cue's earlier documents | ⚠️ `documents_agent` lists/searches `pa_knowledge_chunks` (read-only) via `match_cue_knowledge`, keyed by `pa_users.id`. Live: no-history path verified; **real-user listing/search to be confirmed from the user's phone** (test scripts must not carry real numbers) |
@@ -65,7 +66,10 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
   `/oauth/google/start`, `/oauth/google/callback`, `/oauth/google/status`
 - `src/agents/assistant.py` — builds `ClaudeAgentOptions`, per-user session ids
 - `src/prompts/*.py` — manager + 4 subagent prompts (small, principle-based)
-- `src/tools/{calendar,email,notes,documents,reminders,browser,memory}/` — SDK `@tool` functions.
+- `src/tools/{calendar,email,notes,documents,reminders,browser,memory,data}/` — SDK `@tool` functions.
+  `data/records.py`: per-user Cue records for all; `describe_business_data`/`query_business_data`
+  built only when `user_phone in BUSINESS_DATA_PHONES` (`db.run_business_query`: one SELECT,
+  `SET LOCAL ROLE sellify_reader`, READ ONLY, 10 s timeout, 50 rows).
   `memory/profile.py`: `remember/forget/recall` + `format_profile` (the "What you know about the
   user" block in the manager prompt). `db.get_profile(phone)` merges `sellify_users` with Cue's
   `pa_users` (read-only); facts the user stated win over Cue's values. Web research
@@ -135,7 +139,10 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
 - All `sellify_*` tables have RLS enabled with no policies (set at startup) so Supabase's public
   REST API/anon key can't read them; the app connects as table owner and bypasses RLS. Any new
   table must be added to `_lock_tables` in `src/database.py`. The DB also holds unrelated
-  non-Cue tables (`documents`, `leads`, `products`) — never touch them.
+  non-Cue tables (`documents`, `leads`, `products`) — the client's Alluora WhatsApp sales bot
+  (leads = customer conversations with status/interest/purchase; products = catalogue with
+  `price` text + `metadata.url`; documents = product Q&A KB). Read-only for owner numbers via
+  `data_agent`; never write to them.
 - **Rule (still in force):** Sellify reads `pa_*` but writes only `sellify_*` — the n8n reminder
   scheduler still runs, so writing `pa_reminders` would double-fire.
 - Cue's reference docs (schema, workflows, prompt): Cue handover bundle, not in the repo.
@@ -186,8 +193,9 @@ subscription login is not allowed for a deployed product). Model is **not pinned
     this sandbox set `PLAYWRIGHT_CHROMIUM_PATH=/opt/pw-browsers/chromium` to test locally.
 
 ## Backlog (priority order)
-1. Confirm from a real phone: Gmail API send; a reminder arriving. Typing indicator ✅ (200 OK on
-   real messages 2026-09-23). User to deactivate the n8n Cue workflows in the n8n UI.
+1. User to set `BUSINESS_DATA_PHONES` on Railway (their own + the client's number) and
+   deactivate the n8n Cue workflows in the n8n UI. Confirm from a real phone: Gmail API send;
+   a reminder arriving; earlier-documents listing; business-data questions.
 2. Cue prompt parity: port the voice/rules from the handover `system-prompt.md`, personas,
    core_prompt from `pa_users.profile`. Reminders outside Twilio's 24 h window: register a WhatsApp content template and send
    reminders via it (else they fail with 63016). Persist `_sessions` so proactive turns keep
@@ -223,6 +231,8 @@ subscription login is not allowed for a deployed product). Model is **not pinned
   double-fire). Document retrieval stays on-demand only (user decision).
 - 2026-09-23 Personal memory in `sellify_users.profile` (not `pa_users.profile`, which n8n still
   writes); Cue's earlier documents read in place from `pa_knowledge_chunks`, not migrated.
+- 2026-09-23 Business tables opened to owner numbers only (user request); enforcement is a
+  Postgres role with SELECT on exactly three tables, not SQL parsing.
 - 2026-09-23 n8n Cue path switched off (Twilio subscription deleted, user decision); assistant
   renamed Cue; typing indicator added (Twilio beta endpoint, best effort).
 - 2026-09-23 Booking worker (user-approved): guest bookings only, in the app process (Dockerfile
