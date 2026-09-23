@@ -16,24 +16,27 @@ from src.prompts.email_agent import EMAIL_AGENT_PROMPT
 from src.prompts.calendar_agent import CALENDAR_AGENT_PROMPT
 from src.prompts.notes_agent import NOTES_AGENT_PROMPT
 from src.prompts.research_agent import RESEARCH_AGENT_PROMPT
+from src.prompts.documents_agent import DOCUMENTS_AGENT_PROMPT
 from src.tools.calendar import calendar_tools, CALENDAR_TOOL_NAMES
 from src.tools.email import email_tools, EMAIL_TOOL_NAMES
 from src.tools.notes import build_notes_tools, NOTES_TOOL_NAMES
 from src.tools.research import research_tools, RESEARCH_TOOL_NAMES
+from src.tools.documents import build_document_tools, DOCUMENT_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
 USER_TIMEZONE = "Asia/Singapore"
 
-ALL_TOOL_NAMES = CALENDAR_TOOL_NAMES + EMAIL_TOOL_NAMES + NOTES_TOOL_NAMES + RESEARCH_TOOL_NAMES
+ALL_TOOL_NAMES = (
+    CALENDAR_TOOL_NAMES + EMAIL_TOOL_NAMES + NOTES_TOOL_NAMES + RESEARCH_TOOL_NAMES + DOCUMENT_TOOL_NAMES
+)
 
 
 class PersonalAssistant:
-    """Wires a Claude Agent SDK manager agent with four specialist subagents.
+    """Wires a Claude Agent SDK manager agent with five specialist subagents.
 
-    Runs through the Claude Agent SDK, which drives the same Claude Code CLI
-    this environment is authenticated with, so usage is billed against that
-    account's own subscription rather than a separate metered API key.
+    Authenticates with the ANTHROPIC_API_KEY in the environment (metered API
+    usage); a deployed product may not run on a claude.ai subscription login.
     """
 
     def __init__(self):
@@ -61,12 +64,14 @@ class PersonalAssistant:
             self._sessions[user_phone] = new_session_id
 
         notes_tools = build_notes_tools(user_phone)
+        document_tools = build_document_tools(user_phone)
 
         mcp_servers = {
             "calendar": create_sdk_mcp_server("calendar", tools=calendar_tools),
             "email": create_sdk_mcp_server("email", tools=email_tools),
             "notes": create_sdk_mcp_server("notes", tools=notes_tools),
             "research": create_sdk_mcp_server("research", tools=research_tools),
+            "documents": create_sdk_mcp_server("documents", tools=document_tools),
         }
 
         agents = {
@@ -89,6 +94,11 @@ class PersonalAssistant:
                 description="Searches the web for current information and facts.",
                 prompt=RESEARCH_AGENT_PROMPT.format(current_time=current_time),
                 tools=RESEARCH_TOOL_NAMES,
+            ),
+            "documents_agent": AgentDefinition(
+                description="Finds answers in, lists, and deletes the documents (PDF/Word/text) the user has sent.",
+                prompt=DOCUMENTS_AGENT_PROMPT.format(current_time=current_time),
+                tools=DOCUMENT_TOOL_NAMES,
             ),
         }
 

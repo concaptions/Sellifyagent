@@ -20,7 +20,8 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Gmail read | ✅ Live, verified |
 | Gmail send | ⚠️ Rewired SMTP → Gmail API (commit c97345a), deployed; **live send not yet confirmed** |
 | Notes | ✅ Per-user isolated; now on Cue's Supabase (`sellify_notes`) — **live test pending** |
-| Reading PDF/Word attachments | ❌ Webhook ignores media (`NumMedia`/`MediaUrl0` not read). Cue n8n: PDF only |
+| Document upload (PDF/DOCX/text) | 🚧 V1 built + unit-tested; **live test pending**. Stores extracted text only (no original file), semantic search via OpenAI embeddings, list/delete tools |
+| Webhook security | Twilio signature required on `/whatsapp/webhook`; `/webhook/test` needs `X-Test-Token` |
 | Web search (Tavily) | ❌ `TAVILY_API_KEY` not set on Railway |
 | Proactive follow-ups / reminders | 🚧 Not started (designed only, see Backlog) |
 | Browser automation | 🚧 Not started (see Backlog) |
@@ -42,9 +43,11 @@ and returns `{"phone","reply"}` — no Twilio involved. Best way to test.
   `/oauth/google/start`, `/oauth/google/callback`, `/oauth/google/status`
 - `src/agents/assistant.py` — builds `ClaudeAgentOptions`, per-user session ids
 - `src/prompts/*.py` — manager + 4 subagent prompts (small, principle-based)
-- `src/tools/{calendar,email,notes,research}/` — SDK `@tool` functions
+- `src/tools/{calendar,email,notes,research,documents}/` — SDK `@tool` functions
+- `src/utils/documents.py` — media download (Twilio auth only to *.twilio.com), extract, chunk, embed, ingest
 - `src/utils/google_auth.py` — web OAuth flow, PKCE verifier store, token refresh
-- `src/database.py` — Sellify's own tables `sellify_users`, `sellify_notes`, `sellify_chat_history`
+- `src/database.py` — Sellify's own tables `sellify_users`, `sellify_notes`, `sellify_chat_history`,
+  `sellify_documents`, `sellify_document_chunks` (pgvector 1536)
 - `src/channels/whatsapp.py`, `src/utils/message_splitter.py`
 - `Procfile` — `uvicorn app:app --host 0.0.0.0 --port $PORT`
 
@@ -62,7 +65,9 @@ and returns `{"phone","reply"}` — no Twilio involved. Best way to test.
   services still exist: `twilio-webhook-config`, `agent-smoke-test`, `agent-test-suite`,
   `webhook-oauth-diag` — user has not approved deleting them.
 - Env vars on Sellifyagent: ANTHROPIC_API_KEY, TWILIO_*, FROM_WHATSAPP_NUMBER, GOOGLE_CLIENT_ID/SECRET,
-  GOOGLE_TOKEN_FILE, PUBLIC_BASE_URL, DATABASE_URL, GMAIL_ADDRESS/GMAIL_APP_PASSWORD (now unused).
+  GOOGLE_TOKEN_FILE, PUBLIC_BASE_URL, DATABASE_URL, OPENAI_API_KEY, TEST_WEBHOOK_TOKEN,
+  GMAIL_ADDRESS/GMAIL_APP_PASSWORD (now unused). The probe function has `TEST_WEBHOOK_TOKEN` and
+  `PUBLIC_BASE_URL` as `${{Sellifyagent.*}}` refs.
 
 **Twilio** — WhatsApp number `+65 8415 1532`
 - Messaging Service `MG5c93d431fb48a69979d4390d353e0b65` ("Alluora_WA_Agent"):
@@ -110,6 +115,9 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 10. This sandbox cannot reach `*.railway.app` or `api.twilio.com` (egress proxy 403). To hit
     live services, deploy a one-off script to the `delivery-status-check` Railway Function and
     read its deploy logs. Railway log timestamps lag; use the script's own start time as the window.
+    `/webhook/test` needs header `X-Test-Token: Bun.env.TEST_WEBHOOK_TOKEN`. To replay a WhatsApp
+    message, sign it like Twilio: base64(HMAC-SHA1(authToken, url + sorted key+value pairs)) in
+    `X-Twilio-Signature`, url = `PUBLIC_BASE_URL + "/whatsapp/webhook"`.
 11. Railway `list-deployments` status can stay `BUILDING` after a deploy is actually live — recheck.
 12. Two replies per message is expected (parallel run with Cue), not a bug.
 
@@ -125,10 +133,10 @@ subscription login is not allowed for a deployed product). Model is **not pinned
    **needs explicit user decisions on credential storage, allowed sites, and a confirm-before-act
    gate — do not build on assumptions.**
 5. Set `TAVILY_API_KEY` (user must supply the key).
-6. Document upload (Cue feature, spec from Rich via Usama): receive PDF/DOCX on the webhook,
-   extract text, private Supabase Storage, `user_documents` + `document_chunks` (pgvector, same
-   embedding model as Canon — needs an OpenAI key), search/list/delete tools, hard-delete cascade,
-   Canon facts keep a source-document pointer so deleting a doc flags them for the user.
+6. Document upload follow-ups: live test; auto-retrieve relevant chunks every turn (V1 is
+   tool-based); scanned PDFs via OCR/vision; per-tier storage caps; staleness nudges; when Canon
+   promotion is built, Canon facts must store a source-document id so deleting a doc flags them
+   for the user; keep original files only if needed (then private Supabase Storage).
 7. Cue feature parity: Canon/RAG (pgvector), reminders, personal log, personas, photo/PDF
    ingestion, per-user Google tokens, prompt parity.
 8. Delete now-unused `GMAIL_ADDRESS`/`GMAIL_APP_PASSWORD` on Railway; user should rotate that
@@ -143,6 +151,8 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 - 2026-09-22 New OAuth client "cue" replaced the old "n8n Sellify" client.
 - 2026-09-22 Gmail send moved from SMTP app-password to Gmail API (one Google credential).
 - 2026-09-22 Roadmap: Instinct-style proactive follow-ups + browser automation (user choice).
+- 2026-09-23 Documents V1 stores extracted text only (not the original file): less sensitive data at
+  rest, one-step deletion. Embeddings = OpenAI text-embedding-3-small to match Cue's Canon.
 - 2026-09-23 Sellify = Cue migration. DB moved to Cue's Supabase; Sellify writes only `sellify_*`
   tables until n8n Cue is switched off.
 

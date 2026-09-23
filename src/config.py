@@ -17,6 +17,17 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
+# Embeddings for document search. Must stay OpenAI text-embedding-3-small
+# (1536 dims): it's what Cue's pa_knowledge_chunks Canon store uses, and the
+# document store has to be comparable with it. Without a key, documents are
+# still stored and searched by keyword.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+# Shared secret for POST /webhook/test. That endpoint runs the agent as any
+# phone number it's given and returns the reply, so leaving it open would let
+# anyone read any user's notes and documents. Unset = endpoint disabled.
+TEST_WEBHOOK_TOKEN = os.getenv("TEST_WEBHOOK_TOKEN", "")
+
 WHATSAPP_CHAR_LIMIT = 1600
 
 PORT = int(os.getenv("PORT", "5000"))

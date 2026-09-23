@@ -2,14 +2,16 @@ import asyncio
 import logging
 import os
 
-from fastapi import FastAPI, Form, Response
+from fastapi import FastAPI, Form, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, RedirectResponse
 import uvicorn
+from twilio.request_validator import RequestValidator
 
 from src.agents.assistant import PersonalAssistant
 from src.channels.whatsapp import WhatsAppChannel
-from src.config import PORT, PUBLIC_BASE_URL
+from src.config import PORT, PUBLIC_BASE_URL, TEST_WEBHOOK_TOKEN, TWILIO_AUTH_TOKEN
 from src.database import init_database, upsert_user, save_chat_message
+from src.utils import documents
 from src.utils.google_auth import (
     get_authorization_url,
     exchange_code_for_token,
@@ -34,19 +36,84 @@ except Exception as e:
     logger.warning("Database init skipped (configure DATABASE_URL to enable): %s", e)
 
 
+def _twilio_signature_valid(url: str, params: dict, signature: str) -> bool:
+    if not TWILIO_AUTH_TOKEN or not PUBLIC_BASE_URL:
+        # Local development only: nothing to validate against.
+        logger.warning("Twilio signature check skipped (TWILIO_AUTH_TOKEN/PUBLIC_BASE_URL unset)")
+        return True
+    return RequestValidator(TWILIO_AUTH_TOKEN).validate(url, params, signature)
+
+
 @app.post("/whatsapp/webhook")
-async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
-    phone = From.replace("whatsapp:", "")
-    message = Body.strip()
+async def whatsapp_webhook(request: Request):
+    # Only Twilio may post here. Without this, anyone could send messages as
+    # any phone number (acting on that user's notes, documents and email) and
+    # point MediaUrl at an arbitrary address for the server to fetch. Twilio
+    # signs against the exact URL it was configured with, which is our public
+    # URL, not the internal one this app sees behind Railway's proxy.
+    form = dict(await request.form())
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not _twilio_signature_valid(f"{PUBLIC_BASE_URL}/whatsapp/webhook", form, signature):
+        logger.warning("Rejected webhook with invalid Twilio signature")
+        raise HTTPException(status_code=403, detail="Invalid signature")
 
-    logger.info("Incoming from %s: %s", phone, message[:100])
+    whatsapp_from = form.get("From", "")
+    phone = whatsapp_from.replace("whatsapp:", "")
+    message = (form.get("Body") or "").strip()
+    media = [
+        (form.get(f"MediaUrl{i}"), form.get(f"MediaContentType{i}", ""))
+        for i in range(int(form.get("NumMedia") or 0))
+        if form.get(f"MediaUrl{i}")
+    ]
 
-    asyncio.create_task(_process_message(phone, message, From))
+    logger.info("Incoming from %s: %s (%d attachment(s))", phone, message[:100], len(media))
+
+    asyncio.create_task(_process_message(phone, message, whatsapp_from, media, form.get("MessageSid")))
 
     return Response(content="", media_type="text/xml")
 
 
-async def _process_message(phone: str, message: str, whatsapp_from: str):
+def _ingest_attachment(phone: str, url: str, content_type: str, message_sid: str | None) -> str:
+    """Download and store one attachment; return the system line the agent
+    sees, stating plainly what happened so it can't claim otherwise."""
+    try:
+        if content_type.split(";")[0].strip().lower() not in documents.SUPPORTED_TYPES:
+            raise documents.DocumentError(
+                "I can't read that file type yet. I can read PDF, Word (.docx) and plain-text files."
+            )
+        data, filename = documents.download_media(url)
+        filename = filename or documents.default_filename(content_type, message_sid)
+        result = documents.ingest(phone, data, content_type, filename)
+    except documents.DocumentError as e:
+        return f"[Document: the user attached a file ({content_type}) that was NOT saved. Reason: {e}]"
+    except Exception:
+        logger.exception("Attachment ingest failed")
+        return f"[Document: the user attached a file ({content_type}) that was NOT saved because of a system error. Ask them to try again later.]"
+
+    if result.status == "duplicate":
+        return f"[Document: the user re-sent '{result.filename}', already stored as document id {result.document_id}. Nothing new was saved.]"
+    replaced = f" It replaces the earlier copy (id {result.supersedes_id}), which is kept but no longer searched." if result.supersedes_id else ""
+    search_mode = "" if result.searchable_by_meaning else " Search is keyword-only for now."
+    return (
+        f"[Document: saved '{result.filename}' as document id {result.document_id} "
+        f"({result.char_count:,} characters of text).{replaced}{search_mode}]"
+    )
+
+
+async def _process_message(
+    phone: str,
+    message: str,
+    whatsapp_from: str,
+    media: list[tuple[str, str]] | None = None,
+    message_sid: str | None = None,
+):
+    if media:
+        notes = [
+            await asyncio.to_thread(_ingest_attachment, phone, url, ctype, message_sid)
+            for url, ctype in media
+        ]
+        message = "\n".join(notes) + ("\n\n" + message if message else "")
+
     try:
         await asyncio.to_thread(upsert_user, phone)
     except Exception:
@@ -76,8 +143,15 @@ async def _process_message(phone: str, message: str, whatsapp_from: str):
 
 
 @app.post("/webhook/test")
-async def test_webhook(phone: str = Form("test"), message: str = Form(...)):
-    """Test endpoint that returns the reply directly without sending via WhatsApp."""
+async def test_webhook(
+    phone: str = Form("test"),
+    message: str = Form(...),
+    x_test_token: str = Header(""),
+):
+    """Runs the agent as `phone` and returns the reply without WhatsApp.
+    Requires the X-Test-Token header: it can act as any user."""
+    if not TEST_WEBHOOK_TOKEN or x_test_token != TEST_WEBHOOK_TOKEN:
+        raise HTTPException(status_code=404)
     response = await assistant.ainvoke(message, user_phone=phone)
     return {"phone": phone, "reply": response}
 

@@ -72,6 +72,175 @@ def init_database():
         conn.commit()
         logger.info("Database tables initialized")
 
+    # Separate transaction: if pgvector isn't available, only document search
+    # degrades — notes and chat history above are already committed.
+    try:
+        init_document_tables()
+    except Exception as e:
+        logger.warning("Document tables not initialized: %s", e)
+
+
+def init_document_tables():
+    """Per-user uploaded documents (PDF/DOCX/text) and their searchable chunks.
+
+    Only extracted text is kept, not the original file: less sensitive data
+    held at rest, and deletion is a single cascade. embedding is nullable so a
+    document is still stored and keyword-searchable without an OpenAI key.
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE EXTENSION IF NOT EXISTS vector;
+
+            CREATE TABLE IF NOT EXISTS sellify_documents (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content_type TEXT,
+                size_bytes INT,
+                char_count INT,
+                content_hash TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                supersedes_id INT REFERENCES sellify_documents(id) ON DELETE SET NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE (user_id, content_hash)
+            );
+
+            CREATE TABLE IF NOT EXISTS sellify_document_chunks (
+                id SERIAL PRIMARY KEY,
+                document_id INT NOT NULL REFERENCES sellify_documents(id) ON DELETE CASCADE,
+                user_id TEXT NOT NULL,
+                chunk_index INT NOT NULL,
+                content TEXT NOT NULL,
+                embedding vector(1536)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sellify_documents_user ON sellify_documents(user_id);
+            CREATE INDEX IF NOT EXISTS idx_sellify_document_chunks_user ON sellify_document_chunks(user_id);
+        """)
+        logger.info("Document tables initialized")
+
+
+def _vector_literal(values: list[float]) -> str:
+    return "[" + ",".join(f"{v:.7f}" for v in values) + "]"
+
+
+def find_document_by_hash(user_id: str, content_hash: str) -> dict | None:
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT id, filename, created_at FROM sellify_documents WHERE user_id = %s AND content_hash = %s",
+            (user_id, content_hash),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def save_document(
+    user_id: str,
+    filename: str,
+    content_type: str,
+    size_bytes: int,
+    content_hash: str,
+    chunks: list[str],
+    embeddings: list[list[float]] | None,
+) -> dict:
+    """Store a document and its chunks in one transaction.
+
+    A re-upload under the same filename supersedes the previous active copy
+    (kept, but excluded from search) rather than deleting it: the user may
+    still want the old version, and deletion should be their explicit choice.
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id FROM sellify_documents
+               WHERE user_id = %s AND filename = %s AND status = 'active'
+               ORDER BY created_at DESC LIMIT 1""",
+            (user_id, filename),
+        )
+        prev = cur.fetchone()
+        supersedes_id = prev[0] if prev else None
+        if supersedes_id:
+            cur.execute(
+                "UPDATE sellify_documents SET status = 'superseded' WHERE id = %s AND user_id = %s",
+                (supersedes_id, user_id),
+            )
+
+        cur.execute(
+            """INSERT INTO sellify_documents
+               (user_id, filename, content_type, size_bytes, char_count, content_hash, supersedes_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            (user_id, filename, content_type, size_bytes, sum(len(c) for c in chunks), content_hash, supersedes_id),
+        )
+        doc_id = cur.fetchone()[0]
+
+        for i, chunk in enumerate(chunks):
+            emb = _vector_literal(embeddings[i]) if embeddings else None
+            cur.execute(
+                """INSERT INTO sellify_document_chunks (document_id, user_id, chunk_index, content, embedding)
+                   VALUES (%s, %s, %s, %s, %s::vector)""",
+                (doc_id, user_id, i, chunk, emb),
+            )
+        return {"id": doc_id, "supersedes_id": supersedes_id}
+
+
+def list_documents(user_id: str) -> list[dict]:
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT id, filename, content_type, char_count, status, supersedes_id, created_at
+               FROM sellify_documents WHERE user_id = %s ORDER BY created_at DESC""",
+            (user_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def search_document_chunks(
+    user_id: str, query: str, query_embedding: list[float] | None, limit: int = 5
+) -> list[dict]:
+    """Semantic search when an embedding is available, keyword search otherwise.
+    Superseded documents are excluded; always scoped to user_id."""
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if query_embedding:
+            cur.execute(
+                """SELECT c.content, c.chunk_index, d.id AS document_id, d.filename,
+                          1 - (c.embedding <=> %s::vector) AS score
+                   FROM sellify_document_chunks c
+                   JOIN sellify_documents d ON d.id = c.document_id
+                   WHERE c.user_id = %s AND d.user_id = %s AND d.status = 'active'
+                     AND c.embedding IS NOT NULL
+                   ORDER BY c.embedding <=> %s::vector LIMIT %s""",
+                (_vector_literal(query_embedding), user_id, user_id, _vector_literal(query_embedding), limit),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            if rows:
+                return rows
+        cur.execute(
+            """SELECT c.content, c.chunk_index, d.id AS document_id, d.filename, NULL AS score
+               FROM sellify_document_chunks c
+               JOIN sellify_documents d ON d.id = c.document_id
+               WHERE c.user_id = %s AND d.user_id = %s AND d.status = 'active'
+                 AND c.content ILIKE %s
+               ORDER BY d.created_at DESC, c.chunk_index LIMIT %s""",
+            (user_id, user_id, f"%{query}%", limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def delete_document(user_id: str, document_id: int) -> str | None:
+    """Hard delete (chunks cascade). Returns the filename, or None if the
+    document doesn't exist for this user — never touches another user's rows."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM sellify_documents WHERE id = %s AND user_id = %s RETURNING filename",
+            (document_id, user_id),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
 
 def upsert_user(phone: str, name: str | None = None) -> dict:
     with get_db() as conn:
