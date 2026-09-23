@@ -27,8 +27,8 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Booking worker (browser) | ✅ `browser_agent` + Playwright (Dockerfile on Playwright image). Guest bookings only; login/password/card fields blocked in code; final click locked until the user's own "yes" (`src/utils/approvals.py`); screenshot proof via `/media/<token>.png`. Live-verified 2026-09-23 on httpbin's form: fill → approval question + screenshot → "no" declines → "yes" submits → result screenshot served |
 | Typing indicator | ⚠️ `_keep_typing` in `app.py` calls Twilio's typing-indicator API (public beta) every 20 s during a turn; deployed, **not yet seen working from a real phone** (needs a real inbound MessageSid) |
 | Name | ✅ Assistant introduces itself as **Cue** (manager prompt) |
-| Personal memory | ⚠️ `memory_agent` saves facts to `sellify_users.profile`; profile (+ Cue's `pa_users` name/timezone/core_prompt) injected into every turn; per-user timezone drives reminders. **Live test pending** |
-| Cue's earlier documents | ⚠️ `documents_agent` lists/searches `pa_knowledge_chunks` (read-only) via `match_cue_knowledge`, keyed by `pa_users.id`. **Live test pending** |
+| Personal memory | ✅ `memory_agent` saves facts to `sellify_users.profile`; profile (+ Cue's `pa_users` name/timezone/core_prompt) injected into every turn; per-user timezone drives reminders. Live-verified 2026-09-23 (save without asking, recall, correction, reminder in user's tz) |
+| Cue's earlier documents | ⚠️ `documents_agent` lists/searches `pa_knowledge_chunks` (read-only) via `match_cue_knowledge`, keyed by `pa_users.id`. Live: no-history path verified; **real-user listing/search to be confirmed from the user's phone** (test scripts must not carry real numbers) |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
 
 ## Request flow
@@ -178,6 +178,9 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 17. Timezones are per user: `profile["timezone"]` (fact > Cue's `pa_users.timezone` > column
     default Asia/Singapore). `USER_TIMEZONE` in assistant.py is only the last-resort default.
     The dev is in Pakistan, the client in Singapore — never assume one timezone.
+18. A tool-builder signature mismatch (`build_reminder_tools`) once broke every turn after
+    deploy with a 500. Before pushing agent/tool changes, run the full-options smoke check:
+    `PersonalAssistant()._build_options(phone, profile)` for `{}` and a populated profile.
 16. Playwright's sync API can't be used from the asyncio loop; the browser tools use the async
     API in-process (SDK tools run in the app's loop). Chromium as root needs `--no-sandbox`. In
     this sandbox set `PLAYWRIGHT_CHROMIUM_PATH=/opt/pw-browsers/chromium` to test locally.

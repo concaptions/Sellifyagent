@@ -56,7 +56,7 @@ def _list_documents(user_id: str, cue_user_id: str | None) -> str:
         except Exception as e:
             earlier = [{"error": str(e)}]
     if not lines and not earlier:
-        return "The user has no saved documents."
+        return "The user has no saved documents: nothing sent here, and no earlier documents exist under this number."
     out = f"{len(docs)} document(s) stored here:\n" + ("\n".join(lines) if lines else "- none")
     if earlier:
         if "error" in earlier[0]:
