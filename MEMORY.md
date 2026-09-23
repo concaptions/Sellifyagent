@@ -98,7 +98,8 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
 - project `0c7eae52-1d94-48dd-9c39-b52478345c78`, env production `d42c52fe-fb47-4fbc-b5c2-feb509ecd8d4`
 - service `Sellifyagent` `b4181c17-8822-45de-8a49-80b7d7c72110` — deploys from branch
   `claude/jolly-ramanujan-l0q173` on push; domain `https://sellifyagent-production.up.railway.app`
-- volume `sellifyagent-data` mounted at `/data` (Google token at `/data/token.json`)
+- volume `sellifyagent-data` mounted at `/data` (Google token at `/data/token.json`; Claude session
+  transcripts under `/data/claude` via `CLAUDE_CONFIG_DIR`)
 - `DATABASE_URL` → **Cue's Supabase** (project ref `nnktgpjvtmkqongeubat`, transaction pooler
   :6543, superuser — bypasses RLS). Railway `Postgres` `efca358d-a4c2-4900-aa37-286c6f44e9de` is
   no longer used (holds only old test data); don't delete without asking.
@@ -108,6 +109,7 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
   `webhook-oauth-diag` — user has not approved deleting them.
 - Env vars on Sellifyagent: ANTHROPIC_API_KEY, TWILIO_*, FROM_WHATSAPP_NUMBER, GOOGLE_CLIENT_ID/SECRET,
   GOOGLE_TOKEN_FILE, PUBLIC_BASE_URL, DATABASE_URL, OPENAI_API_KEY, TEST_WEBHOOK_TOKEN,
+  BUSINESS_DATA_PHONES, CLAUDE_CONFIG_DIR=/data/claude,
   GMAIL_ADDRESS/GMAIL_APP_PASSWORD (now unused). No TAVILY_API_KEY needed. The probe function has `TEST_WEBHOOK_TOKEN` and
   `PUBLIC_BASE_URL` as `${{Sellifyagent.*}}` refs.
 
@@ -167,6 +169,12 @@ subscription login is not allowed for a deployed product). Model is **not pinned
    not via tool args or contextvars (those don't survive the SDK subprocess boundary).
 5. Sessions: always pass an explicit `session_id` (new user) or `resume` (returning user), and
    blank `CLAUDE_CODE_SESSION_ID` in `env` — otherwise users can bleed into one ambient session.
+   Conversation memory = the SDK session transcript (whole chat up to the model's context window,
+   auto-compacted when full). It survives redeploys only because (a) `CLAUDE_CONFIG_DIR=/data/claude`
+   puts transcripts on the volume and (b) the session id is persisted in
+   `sellify_users.profile._session_id` (`db.get/set_session_id`; underscore keys are never facts).
+   A resume that fails is retried once as a fresh session. `sellify_chat_history` is a log only;
+   it is not fed back to the model.
 6. Tool names are `mcp__<server>__<tool>`.
 7. google-auth-oauthlib enables PKCE by default; `/start` and `/callback` are separate requests,
    so the `code_verifier` is stored in memory keyed by `state` (10-minute TTL).
@@ -216,8 +224,7 @@ subscription login is not allowed for a deployed product). Model is **not pinned
    a reminder arriving; earlier-documents listing; business-data questions.
 2. Cue prompt parity: port the voice/rules from the handover `system-prompt.md`, personas,
    core_prompt from `pa_users.profile`. Reminders outside Twilio's 24 h window: register a WhatsApp content template and send
-   reminders via it (else they fail with 63016). Persist `_sessions` so proactive turns keep
-   context across restarts.
+   reminders via it (else they fail with 63016).
 3. Pin the model: `ClaudeAgentOptions(model="claude-sonnet-5")` — recommended, awaiting user OK.
 4. Booking worker follow-ups: live-verify on real booking sites; sites with captchas/JS-heavy
    widgets may need per-site handling; browser sessions and approvals are in-memory (lost on

@@ -41,7 +41,7 @@ def format_profile(profile: dict) -> str:
     if profile.get("timezone"):
         lines.append(f"timezone: {profile['timezone']}")
     for k, v in sorted(profile.get("facts", {}).items()):
-        if k in ("name", "timezone") or not str(v).strip():
+        if k in ("name", "timezone") or k.startswith("_") or not str(v).strip():
             continue
         lines.append(f"{k.replace('_', ' ')}: {v}")
     core = (profile.get("core_prompt") or "").strip()
@@ -52,7 +52,11 @@ def format_profile(profile: dict) -> str:
 
 
 def _remember(user_id: str, facts: dict) -> str:
-    clean = {str(k).strip().lower().replace(" ", "_"): str(v).strip() for k, v in facts.items() if str(v).strip()}
+    clean = {
+        str(k).strip().lower().replace(" ", "_"): str(v).strip()
+        for k, v in facts.items()
+        if str(v).strip() and not str(k).strip().startswith("_")
+    }
     if not clean:
         return "Nothing to save."
     if "timezone" in clean:

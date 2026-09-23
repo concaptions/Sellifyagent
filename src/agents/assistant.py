@@ -102,14 +102,17 @@ class PersonalAssistant:
         # message belongs to — that risks one user's turn landing in another
         # user's session. Always assign and pin an explicit per-phone
         # session id instead: a fresh one on first contact, resumed after.
-        existing_session_id = self._sessions.get(user_phone)
+        # The id is also kept in the user's profile, and the transcripts live
+        # under CLAUDE_CONFIG_DIR on the persistent volume, so a redeploy no
+        # longer wipes everyone's conversation memory.
+        existing_session_id = self._sessions.get(user_phone) or profile.get("session_id")
         if existing_session_id:
             resume_id = existing_session_id
             new_session_id = None
         else:
             resume_id = None
             new_session_id = str(uuid.uuid4())
-            self._sessions[user_phone] = new_session_id
+        self._sessions[user_phone] = existing_session_id or new_session_id
 
         notes_tools = build_notes_tools(user_phone)
         document_tools = build_document_tools(user_phone, profile.get("cue_user_id"))
@@ -215,15 +218,35 @@ class PersonalAssistant:
             if images:
                 prompt = _user_turn_with_images(message, images)
 
-            try:
-                async for msg in query(prompt=prompt, options=options):
-                    if isinstance(msg, ResultMessage):
-                        if msg.result:
-                            result_text = msg.result
-                        self._sessions[user_phone] = msg.session_id
-            except Exception as e:
-                logger.error("Assistant error for %s: %s", user_phone, e)
-                return AGENT_ERROR_REPLY
+            for attempt in (1, 2):
+                try:
+                    async for msg in query(prompt=prompt, options=options):
+                        if isinstance(msg, ResultMessage):
+                            if msg.result:
+                                result_text = msg.result
+                            self._sessions[user_phone] = msg.session_id
+                    break
+                except Exception as e:
+                    # A stored session id whose transcript is gone (volume
+                    # wiped, id from another host) makes resume fail; drop it
+                    # and answer in a fresh session rather than failing the turn.
+                    if attempt == 1 and options.resume:
+                        logger.warning("Resume of session for %s failed (%s); starting fresh", user_phone, e)
+                        self._sessions.pop(user_phone, None)
+                        profile = dict(profile, session_id=None)
+                        options = self._build_options(user_phone, profile)
+                        if images:
+                            prompt = _user_turn_with_images(message, images)
+                        continue
+                    logger.error("Assistant error for %s: %s", user_phone, e)
+                    return AGENT_ERROR_REPLY
+
+            session_id = self._sessions.get(user_phone)
+            if session_id and session_id != profile.get("session_id"):
+                try:
+                    await asyncio.to_thread(db.set_session_id, user_phone, session_id)
+                except Exception:
+                    logger.debug("Session id persist skipped (no DB)", exc_info=True)
 
             return result_text or "No response generated."
 

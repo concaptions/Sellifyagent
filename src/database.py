@@ -298,7 +298,10 @@ def get_profile(phone: str) -> dict:
     the read-only bits of Cue's pa_users (name, timezone, core_prompt), so a
     user who set Cue up under n8n is recognised here without being asked
     again. Sellify's own values win when both exist."""
-    out: dict = {"name": None, "timezone": None, "facts": {}, "core_prompt": None, "persona": None, "cue_user_id": None}
+    out: dict = {
+        "name": None, "timezone": None, "facts": {}, "core_prompt": None, "persona": None,
+        "cue_user_id": None, "session_id": None,
+    }
     with get_db() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
@@ -320,7 +323,9 @@ def get_profile(phone: str) -> dict:
         cur.execute("SELECT name, timezone, profile FROM sellify_users WHERE phone = %s", (phone,))
         mine = cur.fetchone()
         if mine:
-            facts = dict(mine["profile"] or {})
+            stored = dict(mine["profile"] or {})
+            out["session_id"] = stored.get("_session_id")
+            facts = {k: v for k, v in stored.items() if not k.startswith("_")}
             out["facts"] = facts
             out["name"] = facts.get("name") or mine["name"] or out["name"]
             # The column has a default, so only a timezone the user actually
@@ -346,6 +351,27 @@ def remember_facts(phone: str, facts: dict) -> dict:
             (phone, facts.get("name"), facts.get("timezone"), json.dumps(facts)),
         )
         return dict(cur.fetchone()["profile"] or {})
+
+
+def get_session_id(phone: str) -> str | None:
+    """The user's Claude session id, kept in their profile under a
+    leading-underscore key so it never shows up as a 'fact'."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT profile->>'_session_id' FROM sellify_users WHERE phone = %s", (phone,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] else None
+
+
+def set_session_id(phone: str, session_id: str) -> None:
+    with get_db() as conn:
+        conn.cursor().execute(
+            """INSERT INTO sellify_users (phone, profile) VALUES (%s, %s::jsonb)
+               ON CONFLICT (phone) DO UPDATE SET
+                   profile = COALESCE(sellify_users.profile, '{}'::jsonb) || EXCLUDED.profile,
+                   updated_at = NOW()""",
+            (phone, json.dumps({"_session_id": session_id})),
+        )
 
 
 def forget_fact(phone: str, key: str) -> bool:
