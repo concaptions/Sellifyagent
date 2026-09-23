@@ -1,25 +1,17 @@
-import asyncio
 import base64
 from email.mime.text import MIMEText
-
-from claude_agent_sdk import tool
 
 from src.utils.google_auth import get_gmail_service, not_connected
 
 
-def _send_email(to: str, subject: str, body: str) -> str:
-    # Sends through the Gmail API using the same OAuth token read_emails uses
-    # (the gmail.send scope was requested alongside gmail.readonly/calendar
-    # specifically for this). This used to go over SMTP with a separate
-    # GMAIL_ADDRESS/GMAIL_APP_PASSWORD pair, which is a second credential to
-    # keep valid on top of the OAuth connection and rejects outright if that
-    # value isn't a real 16-character Google App Password (a regular account
-    # password, or an app password generated without 2FA on, fails the same
-    # way: SMTPAuthenticationError 535). Routing through the OAuth token
-    # instead means there's one Google connection for this whole app, not two.
-    service = get_gmail_service()
+def send_email(phone: str, to: str, subject: str, body: str) -> str:
+    # Sends through the Gmail API with this user's own OAuth token (the
+    # gmail.send scope is requested alongside gmail.readonly/calendar for
+    # this). This used to go over SMTP with a separate app password, which is
+    # a second credential to keep valid and can't be per user.
+    service = get_gmail_service(phone)
     if not service:
-        return not_connected("Gmail")
+        return not_connected("Gmail", phone)
 
     try:
         msg = MIMEText(body)
@@ -44,13 +36,3 @@ SEND_EMAIL_SCHEMA = {
     },
     "required": ["to", "subject", "body"],
 }
-
-
-@tool(
-    "send_email",
-    "Send an email via Gmail. Call only when the user explicitly asks to send an email.",
-    SEND_EMAIL_SCHEMA,
-)
-async def send_email(args: dict) -> dict:
-    result = await asyncio.to_thread(_send_email, args["to"], args["subject"], args["body"])
-    return {"content": [{"type": "text", "text": result}]}

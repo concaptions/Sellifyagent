@@ -1,6 +1,16 @@
+"""Google OAuth for Calendar and Gmail, per WhatsApp user.
+
+Each user connects their own Google account through a personal link; the
+resulting tokens are stored in that user's profile row. The one shared
+token file from the single-account era is kept only as a fallback for the
+owner numbers (BUSINESS_DATA_PHONES), so the client's existing connection
+keeps working while other users connect their own.
+"""
 import hashlib
 import hmac
+import json
 import os
+import secrets
 import time
 import logging
 import threading
@@ -10,44 +20,17 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 from googleapiclient.discovery import build
 
-from src.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, PUBLIC_BASE_URL, TEST_WEBHOOK_TOKEN, TWILIO_AUTH_TOKEN
+from src import database as db
+from src.config import (
+    BUSINESS_DATA_PHONES,
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    PUBLIC_BASE_URL,
+    TEST_WEBHOOK_TOKEN,
+    TWILIO_AUTH_TOKEN,
+)
 
 logger = logging.getLogger(__name__)
-
-# /oauth/google/start replaces the shared Google account with whichever
-# account completes the consent screen, so the link handed out over
-# WhatsApp is signed and short-lived rather than a bare public URL. The
-# signing key is a server secret that never appears in a message.
-_LINK_TTL_SECONDS = 30 * 60
-_LINK_SECRET = (TEST_WEBHOOK_TOKEN or TWILIO_AUTH_TOKEN or "").encode()
-
-
-def make_link_token() -> str:
-    exp = str(int(time.time()) + _LINK_TTL_SECONDS)
-    sig = hmac.new(_LINK_SECRET, exp.encode(), hashlib.sha256).hexdigest()[:32]
-    return f"{exp}.{sig}"
-
-
-def verify_link_token(token: str | None) -> bool:
-    if not _LINK_SECRET:
-        return True  # local development: nothing to sign with
-    try:
-        exp, sig = (token or "").split(".", 1)
-        expected = hmac.new(_LINK_SECRET, exp.encode(), hashlib.sha256).hexdigest()[:32]
-        return hmac.compare_digest(sig, expected) and int(exp) > time.time()
-    except (ValueError, AttributeError):
-        return False
-
-
-def not_connected(service_name: str) -> str:
-    """The message a Google tool returns when there is no usable token: it
-    carries the reconnect link so the user can fix it themselves."""
-    if not PUBLIC_BASE_URL:
-        return f"{service_name} is not connected, and no public URL is configured to offer a reconnect link."
-    return (
-        f"{service_name} is not connected. Tell the user to reconnect Google by opening this link "
-        f"(valid 30 minutes) and signing in: {PUBLIC_BASE_URL}/oauth/google/start?t={make_link_token()}"
-    )
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
@@ -55,9 +38,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
 ]
 
-# Configurable so a persistent volume can be mounted (e.g. /data/token.json)
-# on hosts with an ephemeral filesystem — otherwise a redeploy loses the
-# saved Google token and /oauth/google/start must be visited again.
+# Shared (legacy) token: configurable so a persistent volume can be mounted
+# (e.g. /data/token.json) on hosts with an ephemeral filesystem.
 _TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 
 # credentials.json is never committed (it holds the OAuth client secret), so
@@ -72,138 +54,207 @@ _CREDENTIALS_FILE = "credentials.json"
 # verifier lives only on that one Flow instance in memory. /oauth/google/start
 # and /oauth/google/callback are separate HTTP requests that each build a
 # fresh Flow, so without carrying the verifier over, Google's token endpoint
-# rejects the exchange with "invalid_grant: Missing code verifier" — the
-# callback is presenting a code_verifier-less request against a
-# code_challenge that demands one. Stash it here keyed by the flow's `state`
-# (which round-trips through Google unchanged) so the callback can restore it
-# onto its own Flow before calling fetch_token(). A short-lived in-memory
-# store is enough: this is a one-time admin bootstrap flow, not per-message
-# traffic, and it only needs to survive the seconds between visiting /start
-# and Google redirecting back to /callback within the same running process.
+# rejects the exchange with "invalid_grant: Missing code verifier". Stash it
+# here keyed by the flow's `state` (which round-trips through Google
+# unchanged), together with the phone number the link was issued to, so the
+# callback knows whose tokens it is saving.
 _PKCE_TTL_SECONDS = 600
 _pkce_lock = threading.Lock()
-_pkce_store: dict[str, tuple[str, float]] = {}
+_pkce_store: dict[str, tuple[str, str | None, float]] = {}
 
 
-def _save_code_verifier(state: str, code_verifier: str) -> None:
+def _save_pkce(state: str, code_verifier: str, phone: str | None) -> None:
     with _pkce_lock:
         now = time.time()
-        stale = [k for k, (_, saved_at) in _pkce_store.items() if now - saved_at > _PKCE_TTL_SECONDS]
-        for k in stale:
+        for k in [k for k, (_, _, saved_at) in _pkce_store.items() if now - saved_at > _PKCE_TTL_SECONDS]:
             del _pkce_store[k]
-        _pkce_store[state] = (code_verifier, now)
+        _pkce_store[state] = (code_verifier, phone, now)
 
 
-def _pop_code_verifier(state: str | None) -> str | None:
+def _pop_pkce(state: str | None) -> tuple[str | None, str | None]:
     if not state:
-        return None
+        return None, None
     with _pkce_lock:
         entry = _pkce_store.pop(state, None)
     if not entry:
-        return None
-    code_verifier, saved_at = entry
+        return None, None
+    code_verifier, phone, saved_at = entry
     if time.time() - saved_at > _PKCE_TTL_SECONDS:
-        return None
-    return code_verifier
+        return None, None
+    return code_verifier, phone
 
+
+# --- Personal connect links ---------------------------------------------------
+# /oauth/google/start connects whichever Google account completes the consent
+# screen to the WhatsApp number the link was issued for, so the link must be
+# unguessable and short-lived, and must not carry the phone number itself
+# (URLs end up in proxy logs). An opaque nonce maps to the phone in memory;
+# the nonce is signed so a lost map can only mean "ask for a fresh link".
+_LINK_TTL_SECONDS = 30 * 60
+_LINK_SECRET = (TEST_WEBHOOK_TOKEN or TWILIO_AUTH_TOKEN or "").encode()
+_link_lock = threading.Lock()
+_links: dict[str, tuple[str, float]] = {}
+
+
+def make_link_token(phone: str) -> str:
+    nonce = secrets.token_hex(12)
+    exp = str(int(time.time()) + _LINK_TTL_SECONDS)
+    sig = hmac.new(_LINK_SECRET, f"{nonce}|{exp}".encode(), hashlib.sha256).hexdigest()[:32]
+    with _link_lock:
+        now = time.time()
+        for k in [k for k, (_, e) in _links.items() if e < now]:
+            del _links[k]
+        _links[nonce] = (phone, float(exp))
+    return f"{nonce}.{exp}.{sig}"
+
+
+def resolve_link_token(token: str | None) -> str | None:
+    """The phone a valid, unexpired link was issued to, else None."""
+    try:
+        nonce, exp, sig = (token or "").split(".", 2)
+        expected = hmac.new(_LINK_SECRET, f"{nonce}|{exp}".encode(), hashlib.sha256).hexdigest()[:32]
+        if not hmac.compare_digest(sig, expected) or int(exp) <= time.time():
+            return None
+    except (ValueError, AttributeError):
+        return None
+    with _link_lock:
+        entry = _links.get(nonce)
+    return entry[0] if entry else None
+
+
+def connect_link(phone: str) -> str:
+    return f"{PUBLIC_BASE_URL}/oauth/google/start?t={make_link_token(phone)}"
+
+
+def not_connected(service_name: str, phone: str) -> str:
+    """The message a Google tool returns when this user has no usable token:
+    it carries their personal connect link so they can fix it themselves."""
+    if not PUBLIC_BASE_URL:
+        return f"{service_name} is not connected for this user, and no public URL is configured to offer a connect link."
+    return (
+        f"{service_name} is not connected for this user. Tell them to connect their Google account by "
+        f"opening this personal link (valid 30 minutes) and signing in: {connect_link(phone)}"
+    )
+
+
+# --- Credentials --------------------------------------------------------------
 
 def _client_config() -> dict:
-    return {
-        "web": {
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
+    if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
+        return {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
         }
-    }
+    with open(_CREDENTIALS_FILE) as f:
+        return json.load(f)
 
 
-def get_google_credentials() -> Credentials | None:
-    """Load saved credentials and refresh them if needed.
-
-    Does NOT run an interactive consent flow — that only works with a local
-    browser (see get_authorization_url/exchange_code_for_token below for the
-    headless-server-friendly path). If there is no valid token on disk, the
-    caller gets None and the relevant tool reports "not connected".
-    """
-    creds = None
-
-    if os.path.exists(_TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(_TOKEN_FILE, SCOPES)
-
+def _refresh(creds: Credentials | None, save) -> Credentials | None:
     if creds and not creds.valid and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            with open(_TOKEN_FILE, "w") as f:
-                f.write(creds.to_json())
+            save(creds.to_json())
         except Exception:
             logger.warning("Token refresh failed", exc_info=True)
             return None
+    return creds if creds and creds.valid else None
 
-    if not creds or not creds.valid:
+
+def _shared_credentials() -> Credentials | None:
+    if not os.path.exists(_TOKEN_FILE):
         return None
+    creds = Credentials.from_authorized_user_file(_TOKEN_FILE, SCOPES)
 
-    return creds
+    def save(text: str) -> None:
+        with open(_TOKEN_FILE, "w") as f:
+            f.write(text)
+
+    return _refresh(creds, save)
 
 
-def get_authorization_url(redirect_uri: str) -> str:
-    """Build the Google consent screen URL for the web OAuth flow.
+def get_google_credentials(phone: str | None = None) -> Credentials | None:
+    """This user's own Google credentials, refreshed if needed. Owner numbers
+    fall back to the shared token; anyone else without their own gets None
+    and the calling tool reports "not connected" with a personal link."""
+    if phone:
+        try:
+            stored = db.get_google_tokens(phone)
+        except Exception:
+            logger.debug("Google token lookup skipped (no DB)", exc_info=True)
+            stored = None
+        if stored:
+            creds = Credentials.from_authorized_user_info(json.loads(stored), SCOPES)
+            creds = _refresh(creds, lambda text: db.set_google_tokens(phone, text))
+            if creds:
+                return creds
+        if phone not in BUSINESS_DATA_PHONES:
+            return None
+    return _shared_credentials()
 
-    Use this from a server route (e.g. GET /oauth/google/start) instead of
-    InstalledAppFlow.run_local_server(), which requires a local browser and
-    cannot work on a headless deployment.
-    """
+
+def google_connection_status(phone: str) -> str:
+    creds = get_google_credentials(phone)
+    if not creds:
+        return not_connected("Google (Calendar and Gmail)", phone)
+    try:
+        stored = db.get_google_tokens(phone)
+    except Exception:
+        stored = None
+    which = "their own Google account" if stored else "the shared Google account"
+    return f"Google is connected for this user via {which}. To switch accounts, open: {connect_link(phone)}"
+
+
+# --- Web OAuth flow -----------------------------------------------------------
+
+def get_authorization_url(redirect_uri: str, phone: str | None) -> str:
+    """Build the Google consent screen URL for the web OAuth flow, for the
+    given WhatsApp user (None = the shared account)."""
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
     auth_url, state = flow.authorization_url(
         access_type="offline",
         prompt="consent",
         include_granted_scopes="true",
     )
-    # See the PKCE comment above _pkce_store: this Flow just generated a
-    # code_verifier (PKCE is on by default) that the callback's separate
-    # Flow instance has no way to know about unless we hand it over.
-    if flow.code_verifier:
-        _save_code_verifier(state, flow.code_verifier)
+    _save_pkce(state, flow.code_verifier or "", phone)
     return auth_url
 
 
-def exchange_code_for_token(code: str, redirect_uri: str, state: str | None = None) -> None:
-    """Complete the web OAuth flow: exchange the callback's code for tokens
-    and persist them to token.json. redirect_uri must exactly match the one
-    used in get_authorization_url() and the one registered in Google Cloud
-    Console for this OAuth client. state should be the callback's ?state=
-    query param, used to restore the code_verifier get_authorization_url()
-    stashed for this same flow (see the PKCE comment above _pkce_store).
-    """
+def exchange_code_for_token(code: str, redirect_uri: str, state: str | None = None) -> str | None:
+    """Complete the web OAuth flow and store the tokens for the user the
+    link was issued to (or the shared file when there is none). Returns the
+    phone the tokens were saved for."""
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
-    code_verifier = _pop_code_verifier(state)
+    code_verifier, phone = _pop_pkce(state)
     if code_verifier:
         flow.code_verifier = code_verifier
     flow.fetch_token(code=code)
-    with open(_TOKEN_FILE, "w") as f:
-        f.write(flow.credentials.to_json())
+    text = flow.credentials.to_json()
+    if phone:
+        db.set_google_tokens(phone, text)
+    else:
+        with open(_TOKEN_FILE, "w") as f:
+            f.write(text)
+    return phone
 
 
 def run_local_console_auth() -> None:
-    """One-time interactive helper for running on a machine WITH a browser
-    (e.g. your laptop) to produce a token.json you can then copy to a
-    headless deployment. Not used by the running server.
-    """
+    """One-time interactive helper for a machine WITH a browser to produce a
+    shared token.json. Not used by the running server."""
     flow = InstalledAppFlow.from_client_secrets_file(_CREDENTIALS_FILE, SCOPES)
     creds = flow.run_local_server(port=0)
     with open(_TOKEN_FILE, "w") as f:
         f.write(creds.to_json())
 
 
-def get_calendar_service():
-    creds = get_google_credentials()
-    if not creds:
-        return None
-    return build("calendar", "v3", credentials=creds)
+def get_calendar_service(phone: str | None = None):
+    creds = get_google_credentials(phone)
+    return build("calendar", "v3", credentials=creds) if creds else None
 
 
-def get_gmail_service():
-    creds = get_google_credentials()
-    if not creds:
-        return None
-    return build("gmail", "v1", credentials=creds)
+def get_gmail_service(phone: str | None = None):
+    creds = get_google_credentials(phone)
+    return build("gmail", "v1", credentials=creds) if creds else None

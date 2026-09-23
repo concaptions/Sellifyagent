@@ -1,7 +1,4 @@
-import asyncio
 import uuid
-
-from claude_agent_sdk import tool
 
 from src.utils.google_auth import get_calendar_service, not_connected
 
@@ -20,7 +17,8 @@ def describe_event(event: dict, prefix: str = "Event created") -> str:
     return "\n".join(parts)
 
 
-def _create_calendar_event(
+def create_calendar_event(
+    phone: str,
     summary: str,
     start_time: str,
     end_time: str,
@@ -29,9 +27,9 @@ def _create_calendar_event(
     attendees: list[str] | None,
     add_meet_link: bool,
 ) -> str:
-    service = get_calendar_service()
+    service = get_calendar_service(phone)
     if not service:
-        return not_connected("Google Calendar")
+        return not_connected("Google Calendar", phone)
 
     event_body: dict = {
         "summary": summary,
@@ -94,26 +92,3 @@ CREATE_EVENT_SCHEMA = {
     },
     "required": ["summary", "start_time", "end_time"],
 }
-
-
-@tool(
-    "create_calendar_event",
-    "Create a Google Calendar event, optionally inviting people by email (they get the invitation) and with a Google Meet link. Call this the moment you have all required fields.",
-    CREATE_EVENT_SCHEMA,
-)
-async def create_calendar_event(args: dict) -> dict:
-    attendees = args.get("attendees") or []
-    add_meet = args.get("add_meet_link")
-    if add_meet is None:
-        add_meet = bool(attendees) and not args.get("location")
-    result = await asyncio.to_thread(
-        _create_calendar_event,
-        args["summary"],
-        args["start_time"],
-        args["end_time"],
-        args.get("location"),
-        args.get("description"),
-        attendees,
-        bool(add_meet),
-    )
-    return {"content": [{"type": "text", "text": result}]}

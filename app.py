@@ -21,7 +21,7 @@ from src.utils.google_auth import (
     get_authorization_url,
     exchange_code_for_token,
     get_google_credentials,
-    verify_link_token,
+    resolve_link_token,
 )
 
 logging.basicConfig(
@@ -359,19 +359,19 @@ def _oauth_redirect_uri() -> str:
 
 @app.get("/oauth/google/start")
 async def oauth_google_start(t: str | None = None):
-    """Visit this once (in a browser) to connect the shared Google account
-    (Calendar + Gmail) this assistant uses. Only needs to be done once per
-    token lifetime — the token refresher keeps it alive after that.
-    Needs the signed, short-lived token Cue hands out over WhatsApp, since
-    whoever completes this flow becomes the connected account.
+    """Connect a WhatsApp user's own Google account (Calendar + Gmail).
+    Needs the signed, short-lived personal link Cue hands out over WhatsApp:
+    the link says whose account is being connected, and whoever completes
+    the consent screen becomes that user's Google.
     """
-    if not verify_link_token(t):
+    phone = resolve_link_token(t)
+    if not phone:
         return PlainTextResponse(
-            "This reconnect link is missing or has expired. Ask Cue on WhatsApp to reconnect Google and use the fresh link it sends.",
+            "This connect link is missing, expired, or from before a restart. Ask Cue on WhatsApp to connect Google and use the fresh link it sends.",
             status_code=403,
         )
     try:
-        auth_url = get_authorization_url(_oauth_redirect_uri())
+        auth_url = get_authorization_url(_oauth_redirect_uri(), phone)
     except Exception as e:
         logger.error("Failed to build Google auth URL: %s", e)
         return PlainTextResponse(f"Could not start Google OAuth: {e}", status_code=500)
@@ -400,11 +400,17 @@ async def oauth_google_callback(code: str | None = None, error: str | None = Non
             status_code=400,
         )
     try:
-        await asyncio.to_thread(exchange_code_for_token, code, _oauth_redirect_uri(), state)
+        phone = await asyncio.to_thread(exchange_code_for_token, code, _oauth_redirect_uri(), state)
     except Exception as e:
         logger.error("Google OAuth callback failed: %s", e)
         return PlainTextResponse(f"Google OAuth failed: {e}", status_code=500)
-    return PlainTextResponse("Google account connected. You can close this tab.")
+    if not phone:
+        return PlainTextResponse(
+            "Google signed in, but this link was not tied to a WhatsApp number (the app restarted in between). "
+            "Ask Cue for a fresh link and try again.",
+            status_code=400,
+        )
+    return PlainTextResponse("Google account connected to your WhatsApp number. You can close this tab and go back to Cue.")
 
 
 @app.get("/oauth/google/status")

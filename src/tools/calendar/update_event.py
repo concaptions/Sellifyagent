@@ -1,12 +1,9 @@
-import asyncio
-
-from claude_agent_sdk import tool
-
 from src.tools.calendar.create_event import describe_event
 from src.utils.google_auth import get_calendar_service, not_connected
 
 
-def _update_calendar_event(
+def update_calendar_event(
+    phone: str,
     event_id: str,
     summary: str | None,
     start_time: str | None,
@@ -15,9 +12,9 @@ def _update_calendar_event(
     remove_attendees: list[str] | None,
     location: str | None,
 ) -> str:
-    service = get_calendar_service()
+    service = get_calendar_service(phone)
     if not service:
-        return not_connected("Google Calendar")
+        return not_connected("Google Calendar", phone)
     try:
         # Patching a rescheduled call keeps its attendees and Meet link and
         # lets Google email everyone the change, which delete-and-recreate
@@ -66,22 +63,3 @@ UPDATE_EVENT_SCHEMA = {
     },
     "required": ["event_id"],
 }
-
-
-@tool(
-    "update_calendar_event",
-    "Change an existing event: move it, rename it, or add/remove invitees. Attendees are notified of the change.",
-    UPDATE_EVENT_SCHEMA,
-)
-async def update_calendar_event(args: dict) -> dict:
-    result = await asyncio.to_thread(
-        _update_calendar_event,
-        args["event_id"],
-        args.get("summary"),
-        args.get("start_time"),
-        args.get("end_time"),
-        args.get("add_attendees"),
-        args.get("remove_attendees"),
-        args.get("location"),
-    )
-    return {"content": [{"type": "text", "text": result}]}

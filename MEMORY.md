@@ -34,7 +34,7 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Voice notes | ✅ `audio/*` media → Whisper (`OPENAI_TRANSCRIBE_MODEL`, default `whisper-1`) → `[Voice note, transcribed] …` in the message. Live-verified 2026-09-23 (flac sample; transcript recalled next turn) |
 | Photos (vision) | ✅ `image/*` media → PIL downscale ≤1568 px JPEG → base64 image block via SDK streaming input (`_user_turn_with_images`). Live-verified 2026-09-23 (described a public test photo) |
 | Image generation + charts | ✅ `images_agent`: `generate_image` (OpenAI `OPENAI_IMAGE_MODEL`, default `gpt-image-1`) and `render_chart` (matplotlib) → `/media/<token>.png` → attached as WhatsApp image. Live-verified 2026-09-23 (BP line chart 47 KB; generated poster 2.2 MB, both served) |
-| Google reconnect link | ✅ Google tools return `not_connected()` with a signed 30-min link `/oauth/google/start?t=…` (HMAC with `TEST_WEBHOOK_TOKEN`); `/start` without a valid token → 403. Unit-tested |
+| Google per user | ⚠️ Each WhatsApp number connects its **own** Google (Calendar + Gmail): tokens in `sellify_users.profile._google_tokens`; personal 30-min link `/oauth/google/start?t=<nonce.exp.sig>` (nonce→phone map in memory, HMAC with `TEST_WEBHOOK_TOKEN`; phone never in the URL); `/start` without a valid token → 403. Owner numbers (`BUSINESS_DATA_PHONES`) fall back to the shared `/data/token.json` (the client's account). Calendar/email tools are per-user closures; `google_connect_link` tool reports status + link. Unit-tested; **live link test pending**. Google consent screen is in Testing mode: each new user's Gmail must be added as a test user (or publish the app) |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
 
 ## Request flow
@@ -131,8 +131,10 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
 **Google OAuth** — client "cue" in GCP project `cue-rich-sng`, Web application type
 - Redirect URI: `https://sellifyagent-production.up.railway.app/oauth/google/callback`
 - Consent screen in **Testing** mode; test user `concaptions@gmail.com` (the connected account)
-- Scopes: calendar, gmail.readonly, gmail.send. One shared Google account for ALL WhatsApp users.
-- Reconnect: visit `/oauth/google/start` in a browser. Check: `GET /oauth/google/status`.
+- Scopes: calendar, gmail.readonly, gmail.send. Per-user tokens since 2026-09-23; the shared
+  `/data/token.json` (client's account) is the fallback for owner numbers only.
+- Connect: the user asks Cue ("connect my Google") and opens the personal link. Admin check of
+  the shared token: `GET /oauth/google/status`.
 
 **Cue's Supabase (shared DB)** — Cue n8n owns and still writes:
 - `pa_users` (phone, name, timezone, persona_name, profile jsonb: core_prompt, active_persona,
@@ -235,8 +237,8 @@ subscription login is not allowed for a deployed product). Model is **not pinned
    wanted; convert generated PNGs to JPEG to shrink delivery. Document upload follow-ups: scanned PDFs via OCR/vision; per-tier storage caps; staleness
    nudges; when Canon promotion is built, Canon facts must store a source-document id so
    deleting a doc flags them; keep original files only if needed (private Supabase Storage).
-6. Cue feature parity: Canon/RAG read, personal log, personas, photo ingestion, per-user
-   Google tokens, prompt parity.
+6. Cue feature parity: personal log writes, personas switching, prompt parity. (Canon read,
+   photo ingestion and per-user Google tokens are done.)
 7. Delete now-unused `GMAIL_ADDRESS`/`GMAIL_APP_PASSWORD` on Railway; user should rotate that
    Gmail password (it was shared in plaintext in chat).
 8. Merge PR #1 so `main` has the code; clean up leftover Railway test services (ask first).
@@ -258,8 +260,11 @@ subscription login is not allowed for a deployed product). Model is **not pinned
   double-fire). Document retrieval stays on-demand only (user decision).
 - 2026-09-23 Personal memory in `sellify_users.profile` (not `pa_users.profile`, which n8n still
   writes); Cue's earlier documents read in place from `pa_knowledge_chunks`, not migrated.
-- 2026-09-23 Calls with other people = calendar events with attendees on the shared Google
-  account (Google sends the invites); contacts' emails are remembered as `<name>_email` facts.
+- 2026-09-23 Calls with other people = calendar events with attendees (Google sends the
+  invites); contacts' emails are remembered as `<name>_email` facts.
+- 2026-09-23 Google went per user (supersedes the 09-21 shared-account decision): a shared
+  account can't serve several people, and a reconnect link would have let anyone replace it.
+  Owner numbers keep the shared token as fallback so the client isn't interrupted.
 - 2026-09-23 Voice/photo/image features use the existing OpenAI key (Whisper, gpt-image-1) and
   Claude vision; no new vendor. Generated media is served from the app's own `/media/` store.
 - 2026-09-23 Business tables opened to owner numbers only (user request); enforcement is a

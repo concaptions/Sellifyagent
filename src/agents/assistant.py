@@ -25,8 +25,8 @@ from src.prompts.data_agent import DATA_AGENT_PROMPT
 from src.prompts.images_agent import IMAGES_AGENT_PROMPT
 from src.tools.images import image_tools, IMAGE_TOOL_NAMES
 from src.config import BUSINESS_DATA_PHONES
-from src.tools.calendar import calendar_tools, CALENDAR_TOOL_NAMES
-from src.tools.email import email_tools, EMAIL_TOOL_NAMES
+from src.tools.calendar import build_calendar_tools, CALENDAR_TOOL_NAMES
+from src.tools.email import build_email_tools, EMAIL_TOOL_NAMES
 from src.tools.notes import build_notes_tools, NOTES_TOOL_NAMES
 from src.tools.documents import build_document_tools, DOCUMENT_TOOL_NAMES
 from src.tools.reminders import build_reminder_tools, REMINDER_TOOL_NAMES
@@ -114,6 +114,8 @@ class PersonalAssistant:
             new_session_id = str(uuid.uuid4())
         self._sessions[user_phone] = existing_session_id or new_session_id
 
+        calendar_tools = build_calendar_tools(user_phone)
+        email_tools = build_email_tools(user_phone)
         notes_tools = build_notes_tools(user_phone)
         document_tools = build_document_tools(user_phone, profile.get("cue_user_id"))
         reminder_tools = build_reminder_tools(user_phone, user_timezone)
@@ -143,7 +145,7 @@ class PersonalAssistant:
             "email_agent": AgentDefinition(
                 description="Handles Gmail: reading and sending emails.",
                 prompt=EMAIL_AGENT_PROMPT.format(current_time=current_time),
-                tools=EMAIL_TOOL_NAMES,
+                tools=EMAIL_TOOL_NAMES + ["mcp__calendar__google_connect_link"],
             ),
             "notes_agent": AgentDefinition(
                 description="Saves, lists, and searches the user's personal notes.",

@@ -1,14 +1,10 @@
-import asyncio
-
-from claude_agent_sdk import tool
-
 from src.utils.google_auth import get_gmail_service, not_connected
 
 
-def _read_emails(query: str, max_results: int) -> str:
-    service = get_gmail_service()
+def read_emails(phone: str, query: str, max_results: int) -> str:
+    service = get_gmail_service(phone)
     if not service:
-        return not_connected("Gmail")
+        return not_connected("Gmail", phone)
 
     try:
         result = service.users().messages().list(
@@ -60,15 +56,3 @@ READ_EMAILS_SCHEMA = {
     },
     "required": [],
 }
-
-
-@tool(
-    "read_emails",
-    "Search and read Gmail messages. Returns sender, subject, date, and a snippet of each.",
-    READ_EMAILS_SCHEMA,
-)
-async def read_emails(args: dict) -> dict:
-    query = args.get("query") or "is:unread"
-    max_results = args.get("max_results") or 5
-    result = await asyncio.to_thread(_read_emails, query, max_results)
-    return {"content": [{"type": "text", "text": result}]}

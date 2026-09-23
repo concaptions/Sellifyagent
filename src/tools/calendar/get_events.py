@@ -1,15 +1,12 @@
-import asyncio
 from datetime import datetime, timedelta, timezone
-
-from claude_agent_sdk import tool
 
 from src.utils.google_auth import get_calendar_service, not_connected
 
 
-def _get_calendar_events(days_ahead: int, query: str | None) -> str:
-    service = get_calendar_service()
+def get_calendar_events(phone: str, days_ahead: int, query: str | None) -> str:
+    service = get_calendar_service(phone)
     if not service:
-        return not_connected("Google Calendar")
+        return not_connected("Google Calendar", phone)
 
     now = datetime.now(timezone.utc)
     time_max = now + timedelta(days=days_ahead)
@@ -71,15 +68,3 @@ GET_EVENTS_SCHEMA = {
     },
     "required": [],
 }
-
-
-@tool(
-    "get_calendar_events",
-    "Fetch upcoming Google Calendar events. Returns event summaries, times, and locations.",
-    GET_EVENTS_SCHEMA,
-)
-async def get_calendar_events(args: dict) -> dict:
-    days_ahead = args.get("days_ahead") or 7
-    query = args.get("query") or None
-    result = await asyncio.to_thread(_get_calendar_events, days_ahead, query)
-    return {"content": [{"type": "text", "text": result}]}

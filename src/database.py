@@ -374,6 +374,27 @@ def set_session_id(phone: str, session_id: str) -> None:
         )
 
 
+def get_google_tokens(phone: str) -> str | None:
+    """This user's Google OAuth tokens (the credentials JSON), stored under an
+    underscore key so they are never surfaced as a 'fact'."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT profile->>'_google_tokens' FROM sellify_users WHERE phone = %s", (phone,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] else None
+
+
+def set_google_tokens(phone: str, tokens_json: str) -> None:
+    with get_db() as conn:
+        conn.cursor().execute(
+            """INSERT INTO sellify_users (phone, profile) VALUES (%s, %s::jsonb)
+               ON CONFLICT (phone) DO UPDATE SET
+                   profile = COALESCE(sellify_users.profile, '{}'::jsonb) || EXCLUDED.profile,
+                   updated_at = NOW()""",
+            (phone, json.dumps({"_google_tokens": tokens_json})),
+        )
+
+
 def forget_fact(phone: str, key: str) -> bool:
     with get_db() as conn:
         cur = conn.cursor()
