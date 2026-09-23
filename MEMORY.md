@@ -16,7 +16,7 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Area | State |
 |---|---|
 | WhatsApp inbound → agent → reply | ✅ Verified end-to-end from a real phone |
-| Google Calendar (read/create/delete) | ✅ Live, verified |
+| Google Calendar (read/create/update/delete) | ✅ Live, verified. Invitees + Google Meet: `create_calendar_event(attendees, add_meet_link)` sends Google invitations (`sendUpdates=all`, `conferenceDataVersion=1`); `update_calendar_event` reschedules/re-invites with notifications. Unit-tested with a mocked service; **live invite test pending** |
 | Gmail read | ✅ Live, verified |
 | Gmail send | ⚠️ Rewired SMTP → Gmail API (commit c97345a), deployed; **live send not yet confirmed** |
 | Notes | ✅ Per-user isolated; on Cue's Supabase (`sellify_notes`), live-verified 2026-09-23 |
@@ -250,6 +250,8 @@ subscription login is not allowed for a deployed product). Model is **not pinned
   double-fire). Document retrieval stays on-demand only (user decision).
 - 2026-09-23 Personal memory in `sellify_users.profile` (not `pa_users.profile`, which n8n still
   writes); Cue's earlier documents read in place from `pa_knowledge_chunks`, not migrated.
+- 2026-09-23 Calls with other people = calendar events with attendees on the shared Google
+  account (Google sends the invites); contacts' emails are remembered as `<name>_email` facts.
 - 2026-09-23 Voice/photo/image features use the existing OpenAI key (Whisper, gpt-image-1) and
   Claude vision; no new vendor. Generated media is served from the app's own `/media/` store.
 - 2026-09-23 Business tables opened to owner numbers only (user request); enforcement is a

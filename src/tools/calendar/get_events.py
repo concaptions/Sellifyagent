@@ -43,6 +43,11 @@ def _get_calendar_events(days_ahead: int, query: str | None) -> str:
             line = f"- {summary}: {start} to {end}"
             if location:
                 line += f" at {location}"
+            attendees = [a.get("email") for a in event.get("attendees", []) if a.get("email") and not a.get("self")]
+            if attendees:
+                line += f" with {', '.join(attendees)}"
+            if event.get("hangoutLink"):
+                line += f" (Meet: {event['hangoutLink']})"
             line += f" [id: {event_id}]"
             lines.append(line)
 
