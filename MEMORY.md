@@ -16,7 +16,8 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Area | State |
 |---|---|
 | WhatsApp inbound → agent → reply | ✅ Verified end-to-end from a real phone |
-| Google Calendar (read/create/update/delete) | ✅ Live, verified. Invitees + Google Meet: `create_calendar_event(attendees, add_meet_link)` sends Google invitations (`sendUpdates=all`, `conferenceDataVersion=1`); `update_calendar_event` reschedules/re-invites with notifications. Unit-tested with a mocked service; **live invite test pending** |
+| Google Calendar (read/create/update/delete) | ✅ Live, verified. Invitees + Google Meet: `create_calendar_event(attendees, add_meet_link)` sends Google invitations (`sendUpdates=all`, `conferenceDataVersion=1`); `update_calendar_event` reschedules/re-invites with notifications. Live-verified 2026-09-23: asks for an unknown invitee's email once, invites + Meet link, reschedule keeps Meet link and notifies, listing shows invitees, contact email remembered |
+| Conversation memory across redeploys | ✅ Session id in `sellify_users.profile._session_id`; transcripts under `/data/claude` (confirmed in logs after deploy 51cd70f) |
 | Gmail read | ✅ Live, verified |
 | Gmail send | ⚠️ Rewired SMTP → Gmail API (commit c97345a), deployed; **live send not yet confirmed** |
 | Notes | ✅ Per-user isolated; on Cue's Supabase (`sellify_notes`), live-verified 2026-09-23 |
@@ -221,7 +222,7 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 ## Backlog (priority order)
 1. User to set `BUSINESS_DATA_PHONES` on Railway (their own + the client's number) and
    deactivate the n8n Cue workflows in the n8n UI. Confirm from a real phone: Gmail API send;
-   a reminder arriving; earlier-documents listing; business-data questions.
+   a reminder arriving; earlier-documents listing; business-data questions; a real invite.
 2. Cue prompt parity: port the voice/rules from the handover `system-prompt.md`, personas,
    core_prompt from `pa_users.profile`. Reminders outside Twilio's 24 h window: register a WhatsApp content template and send
    reminders via it (else they fail with 63016).

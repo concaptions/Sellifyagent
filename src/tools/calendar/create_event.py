@@ -8,7 +8,9 @@ from src.utils.google_auth import get_calendar_service, not_connected
 
 def describe_event(event: dict, prefix: str = "Event created") -> str:
     start = event["start"].get("dateTime", event["start"].get("date"))
-    parts = [f"{prefix}: {event.get('summary')} on {start} [id: {event.get('id')}]"]
+    end = event.get("end", {}).get("dateTime", event.get("end", {}).get("date"))
+    when = f"{start} to {end}" if end else start
+    parts = [f"{prefix}: {event.get('summary')} on {when} [id: {event.get('id')}]"]
     attendees = [a.get("email") for a in event.get("attendees", []) if a.get("email")]
     if attendees:
         parts.append("Invitations sent to: " + ", ".join(attendees))
