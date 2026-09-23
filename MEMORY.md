@@ -24,7 +24,9 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Webhook security | ✅ Real Twilio signatures pass (real phone); forged → 403; unsigned `/webhook/test` → 404 |
 | Web search | ✅ Claude Code built-in `WebSearch`/`WebFetch` (no Tavily key); live-verified 2026-09-23 (same-day headline with source URL; page fetch) |
 | Reminders + proactive follow-ups | ✅ `sellify_reminders` + `reminders_agent` + 60 s scheduler; live-verified 2026-09-23 via `/webhook/test`. Repeating reminders: min every 10 min, created only after the user OKs the schedule, every message carries "Reply *stop*", and "stop" is handled in `app.py` code. **Not yet fired to a real phone** |
-| Booking worker (browser) | ⚠️ Built: `browser_agent` + Playwright (Dockerfile on Playwright image). Guest bookings only; login/password/card fields blocked in code; final click locked until the user's own "yes" (`src/utils/approvals.py`); screenshot proof via `/media/<token>.png`. **Live test pending** |
+| Booking worker (browser) | ✅ `browser_agent` + Playwright (Dockerfile on Playwright image). Guest bookings only; login/password/card fields blocked in code; final click locked until the user's own "yes" (`src/utils/approvals.py`); screenshot proof via `/media/<token>.png`. Live-verified 2026-09-23 on httpbin's form: fill → approval question + screenshot → "no" declines → "yes" submits → result screenshot served |
+| Typing indicator | ⚠️ `_keep_typing` in `app.py` calls Twilio's typing-indicator API (public beta) every 20 s during a turn; deployed, **not yet seen working from a real phone** (needs a real inbound MessageSid) |
+| Name | ✅ Assistant introduces itself as **Cue** (manager prompt) |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
 
 ## Request flow
@@ -97,9 +99,14 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
   `inbound_request_url` → Sellify `/whatsapp/webhook`
 - WhatsApp Sender `XE4e11e1b1329072d9db0df649b8dc7ebf`: webhook → Sellify `/whatsapp/webhook`.
   **The Sender-level webhook overrides the Messaging Service URL.**
-- Event Streams subscription `DF21bd8006e280b0ad56063e6c60e01d39` → sink → n8n Cue
-  (`primary-production-302c.up.railway.app`). **Parallel run**: every message gets a Cue
-  reply AND a Sellify reply. Deliberate; do not remove without user approval.
+- **n8n Cue is cut off (2026-09-23, user-approved):** Event Streams subscription
+  `DF21bd8006e280b0ad56063e6c60e01d39` (created by n8n's Twilio Trigger node; sink
+  `DG2ed2453a79e56fe0979f0432ab54c006`; event `com.twilio.messaging.inbound-message.received`)
+  was deleted; the account now has no subscriptions. Only Sellify replies. The n8n workflows
+  themselves (`Zt6HfEJE9W4cb5yz` main, `hZ3ILef5sJkBjxvV` reminder scheduler) are still active
+  on `primary-production-302c.up.railway.app` — the n8n MCP here points at a different
+  instance, so the user must deactivate them in the n8n UI (re-activating the main workflow
+  would recreate the subscription). The n8n reminder scheduler still fires `pa_reminders`.
 
 **Google OAuth** — client "cue" in GCP project `cue-rich-sng`, Web application type
 - Redirect URI: `https://sellifyagent-production.up.railway.app/oauth/google/callback`
@@ -117,8 +124,8 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
   REST API/anon key can't read them; the app connects as table owner and bypasses RLS. Any new
   table must be added to `_lock_tables` in `src/database.py`. The DB also holds unrelated
   non-Cue tables (`documents`, `leads`, `products`) — never touch them.
-- **Rule during parallel run:** Sellify reads `pa_*` but writes only `sellify_*` (writing
-  `pa_users`/`pa_reminders` would double-count stats and double-fire reminders).
+- **Rule (still in force):** Sellify reads `pa_*` but writes only `sellify_*` — the n8n reminder
+  scheduler still runs, so writing `pa_reminders` would double-fire.
 - Cue's reference docs (schema, workflows, prompt): Cue handover bundle, not in the repo.
 
 **LLM** — Claude Agent SDK 0.2.157, metered `ANTHROPIC_API_KEY` (a claude.ai
@@ -148,8 +155,8 @@ subscription login is not allowed for a deployed product). Model is **not pinned
     `get-logs`/`list-deployments` tools sometimes fail with "does not match output schema";
     the `railway-agent` tool can still return the same logs verbatim (ask for raw lines).
 11. Railway `list-deployments` status can stay `BUILDING` after a deploy is actually live — recheck.
-12. Two replies per message is expected (parallel run with Cue), not a bug. For documents, Cue replies
-    "Got your file (N chars). Added to your canon"; Sellify replies separately.
+12. (Historical) During the parallel run every message got two replies. Since 2026-09-23 only
+    Sellify replies; if two replies reappear, the n8n workflow was re-activated.
 13. WhatsApp sends a document's filename as the message Body (and Twilio media often has no
     Content-Disposition), so `app.py` uses the Body as the filename when it looks like one.
 14. `PersonalAssistant.ainvoke` holds a per-user `asyncio.Lock`: a reminder turn and a user
@@ -161,8 +168,11 @@ subscription login is not allowed for a deployed product). Model is **not pinned
     this sandbox set `PLAYWRIGHT_CHROMIUM_PATH=/opt/pw-browsers/chromium` to test locally.
 
 ## Backlog (priority order)
-1. Confirm live: Gmail API send; a reminder actually arriving on a real phone (ask the user to text "remind me in 2 minutes to …").
-2. Reminders outside Twilio's 24 h window: register a WhatsApp content template and send
+1. Confirm from a real phone: Gmail API send; a reminder arriving; the typing indicator
+   (check app logs for "Typing indicator refused" — the account may need the beta enabled).
+   User to deactivate the n8n Cue workflows in the n8n UI.
+2. Cue prompt parity: port the voice/rules from the handover `system-prompt.md`, personas,
+   core_prompt from `pa_users.profile`. Reminders outside Twilio's 24 h window: register a WhatsApp content template and send
    reminders via it (else they fail with 63016). Persist `_sessions` so proactive turns keep
    context across restarts.
 3. Pin the model: `ClaudeAgentOptions(model="claude-sonnet-5")` — recommended, awaiting user OK.
@@ -194,6 +204,8 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 - 2026-09-23 Web search via Claude's built-in WebSearch/WebFetch, not Tavily (one API bill, no
   extra key). Reminders live in `sellify_reminders` (not `pa_reminders`: Cue's scheduler would
   double-fire). Document retrieval stays on-demand only (user decision).
+- 2026-09-23 n8n Cue path switched off (Twilio subscription deleted, user decision); assistant
+  renamed Cue; typing indicator added (Twilio beta endpoint, best effort).
 - 2026-09-23 Booking worker (user-approved): guest bookings only, in the app process (Dockerfile
   on the Playwright image) rather than a separate service; approval and no-login/no-payment rules
   enforced in code, not prompts. Repeating reminders: ≥10 min, user-confirmed, "stop" in code.

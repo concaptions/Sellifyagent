@@ -32,7 +32,7 @@ _SNAPSHOT_JS = """
     if (r.width === 0 || r.height === 0 || style.visibility === 'hidden' || style.display === 'none') continue;
     if (el.type === 'hidden') continue;
     el.setAttribute('data-sellify-idx', String(i));
-    const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
+    const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.value || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
     out.push({
       idx: i++,
       tag: el.tagName.toLowerCase(),
@@ -40,6 +40,8 @@ _SNAPSHOT_JS = """
       text,
       name: el.getAttribute('name') || el.id || '',
       href: el.tagName === 'A' ? (el.getAttribute('href') || '').slice(0, 120) : '',
+      checked: (el.type === 'checkbox' || el.type === 'radio') ? !!el.checked : undefined,
+      value: (el.tagName === 'INPUT' && el.type !== 'checkbox' && el.type !== 'radio' && el.type !== 'password') ? String(el.value || '').slice(0, 60) : undefined,
       options: el.tagName === 'SELECT' ? Array.from(el.options).slice(0, 30).map(o => o.value + (o.text && o.text !== o.value ? ' (' + o.text.trim().slice(0, 40) + ')' : '')) : undefined,
     });
   }
@@ -138,6 +140,10 @@ async def snapshot(s: BrowserSession) -> str:
         desc = f"[{e['idx']}] <{e['tag']}{(' ' + e['type']) if e['type'] else ''}> {e['text']}"
         if e["name"]:
             desc += f" (name={e['name']})"
+        if e.get("checked") is not None:
+            desc += " [checked]" if e["checked"] else " [not checked]"
+        if e.get("value"):
+            desc += f" value=\"{e['value']}\""
         if e["href"]:
             desc += f" -> {e['href']}"
         if e.get("options"):
