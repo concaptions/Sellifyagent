@@ -58,7 +58,9 @@ def download_media(url: str) -> tuple[bytes, str | None]:
     ride along to whatever that (or a spoofed MediaUrl) points at.
     """
     auth = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if _is_twilio_host(url) else None
-    with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+    # Some hosts refuse the default python-httpx agent outright (403).
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; Cue/1.0; +https://sellifyagent-production.up.railway.app)"}
+    with httpx.Client(timeout=30.0, follow_redirects=False, headers=headers) as client:
         resp = client.get(url, auth=auth)
         hops = 0
         while resp.is_redirect and hops < 5:

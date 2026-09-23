@@ -33,9 +33,11 @@ def transcribe(data: bytes, content_type: str) -> str:
         raise MediaError("voice notes can't be transcribed because no transcription key is configured")
     if len(data) > MAX_AUDIO_BYTES:
         raise MediaError("that voice note is too long to transcribe (25 MB limit)")
-    ext = {"audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/amr": "amr", "audio/wav": "wav"}.get(
-        content_type.split(";")[0].strip().lower(), "ogg"
-    )
+    ext = {
+        "audio/ogg": "ogg", "audio/opus": "ogg", "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/mp4": "m4a",
+        "audio/m4a": "m4a", "audio/aac": "m4a", "audio/amr": "amr", "audio/wav": "wav", "audio/x-wav": "wav",
+        "audio/flac": "flac", "audio/x-flac": "flac", "audio/webm": "webm",
+    }.get(content_type.split(";")[0].strip().lower(), "ogg")
     with httpx.Client(timeout=120.0) as client:
         resp = client.post(
             "https://api.openai.com/v1/audio/transcriptions",
