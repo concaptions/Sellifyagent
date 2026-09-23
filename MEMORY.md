@@ -19,9 +19,9 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Google Calendar (read/create/delete) | ✅ Live, verified |
 | Gmail read | ✅ Live, verified |
 | Gmail send | ⚠️ Rewired SMTP → Gmail API (commit c97345a), deployed; **live send not yet confirmed** |
-| Notes | ✅ Per-user isolated; now on Cue's Supabase (`sellify_notes`) — **live test pending** |
-| Document upload (PDF/DOCX/text) | 🚧 V1 built + unit-tested; **live test pending**. Stores extracted text only (no original file), semantic search via OpenAI embeddings, list/delete tools |
-| Webhook security | Twilio signature required on `/whatsapp/webhook`; `/webhook/test` needs `X-Test-Token` |
+| Notes | ✅ Per-user isolated; on Cue's Supabase (`sellify_notes`), live-verified 2026-09-23 |
+| Document upload (PDF/DOCX/text) | ✅ V1 live-verified 2026-09-23 via signed replay (15-page PDF → 40 chunks embedded → correct answer → delete). **Not yet tried from a real phone.** Stores extracted text only |
+| Webhook security | ✅ Forged Twilio signature → 403, unsigned `/webhook/test` → 404 (live-verified). Real-Twilio signature path not yet confirmed from a phone |
 | Web search (Tavily) | ❌ `TAVILY_API_KEY` not set on Railway |
 | Proactive follow-ups / reminders | 🚧 Not started (designed only, see Backlog) |
 | Browser automation | 🚧 Not started (see Backlog) |
@@ -133,7 +133,7 @@ subscription login is not allowed for a deployed product). Model is **not pinned
    **needs explicit user decisions on credential storage, allowed sites, and a confirm-before-act
    gate — do not build on assumptions.**
 5. Set `TAVILY_API_KEY` (user must supply the key).
-6. Document upload follow-ups: live test; auto-retrieve relevant chunks every turn (V1 is
+6. Document upload follow-ups: confirm from a real phone (also proves real Twilio signatures pass); auto-retrieve relevant chunks every turn (V1 is
    tool-based); scanned PDFs via OCR/vision; per-tier storage caps; staleness nudges; when Canon
    promotion is built, Canon facts must store a source-document id so deleting a doc flags them
    for the user; keep original files only if needed (then private Supabase Storage).
