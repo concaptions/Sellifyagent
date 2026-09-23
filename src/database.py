@@ -480,6 +480,9 @@ def init_business_reader() -> None:
         if not cur.fetchone():
             cur.execute(f"CREATE ROLE {READER_ROLE} NOLOGIN")
         cur.execute(f"GRANT USAGE ON SCHEMA public TO {READER_ROLE}")
+        # Supabase's postgres login is not a true superuser, so SET ROLE
+        # requires membership; the login created the role, so it may grant it.
+        cur.execute(f"GRANT {READER_ROLE} TO CURRENT_USER")
     # One grant per table, each in its own transaction, so a table that
     # doesn't exist (a dev database) doesn't take the others down with it.
     for table in BUSINESS_TABLES:
