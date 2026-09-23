@@ -30,6 +30,20 @@ def get_db():
 # tables: writing to pa_users would double-count every message on the live
 # user's row (both bots handle each one). Cue's tables are read-only to Sellify
 # until n8n Cue is switched off and Sellify takes them over.
+def _lock_tables(cur, *tables: str) -> None:
+    """Enable row-level security with no policies.
+
+    Supabase serves every table in the public schema over its REST API, and
+    the anon key that API accepts is designed to be public. A table without
+    RLS is therefore readable by anyone holding that key — for these tables,
+    users' notes and uploaded documents (which can be health records). RLS
+    with no policies denies the REST API entirely, matching Cue's pa_* tables;
+    this app connects as the table owner, which bypasses RLS, so it's unaffected.
+    """
+    for table in tables:
+        cur.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+
+
 def init_database():
     with get_db() as conn:
         cur = conn.cursor()
@@ -69,6 +83,7 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_sellify_notes_user ON sellify_notes(user_id);
             CREATE INDEX IF NOT EXISTS idx_sellify_chat_history_user ON sellify_chat_history(user_id);
         """)
+        _lock_tables(cur, "sellify_users", "sellify_notes", "sellify_chat_history")
         conn.commit()
         logger.info("Database tables initialized")
 
@@ -118,6 +133,7 @@ def init_document_tables():
             CREATE INDEX IF NOT EXISTS idx_sellify_documents_user ON sellify_documents(user_id);
             CREATE INDEX IF NOT EXISTS idx_sellify_document_chunks_user ON sellify_document_chunks(user_id);
         """)
+        _lock_tables(cur, "sellify_documents", "sellify_document_chunks")
         logger.info("Document tables initialized")
 
 

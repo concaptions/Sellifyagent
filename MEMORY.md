@@ -90,6 +90,10 @@ and returns `{"phone","reply"}` — no Twilio involved. Best way to test.
 - `pa_knowledge_chunks` (Canon: `embedding vector(1536)`, OpenAI `text-embedding-3-small`,
   ~1200-char chunks) + `match_cue_knowledge(query_embedding, match_count, filter)` — fails closed
   without `filter.user_id`.
+- All `sellify_*` tables have RLS enabled with no policies (set at startup) so Supabase's public
+  REST API/anon key can't read them; the app connects as table owner and bypasses RLS. Any new
+  table must be added to `_lock_tables` in `src/database.py`. The DB also holds unrelated
+  non-Cue tables (`documents`, `leads`, `products`) — never touch them.
 - **Rule during parallel run:** Sellify reads `pa_*` but writes only `sellify_*` (writing
   `pa_users`/`pa_reminders` would double-count stats and double-fire reminders).
 - Cue's reference docs (schema, workflows, prompt): Cue handover bundle, not in the repo.
