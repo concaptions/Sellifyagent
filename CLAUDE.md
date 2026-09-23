@@ -48,7 +48,11 @@ Read it before exploring the codebase; it usually answers "where is X" without o
   synchronously. This sandbox can't reach Railway directly; see MEMORY.md gotcha #10.
 - Print the response body in live-test scripts (not just the status code).
 
-## Operational rules — ask the user first
+## Operational rules
+The user wants autonomy: build, deploy, and test end-to-end without asking for routine
+permissions. Report results, not plans. Only stop and ask for:
+- Security risks (credentials, access scope, anything exposing user data).
+- Changes that could alter or double-write live user data in Cue's `pa_*` tables.
 - Changing Twilio routing (webhooks, Event Streams) — it affects the live Cue assistant.
 - Deleting Railway services, volumes, or env vars; changing the Google OAuth client.
 - Anything that sends real email or WhatsApp messages to people other than the user.
