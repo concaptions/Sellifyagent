@@ -2,16 +2,20 @@ import asyncio
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, RedirectResponse
 import uvicorn
 from twilio.request_validator import RequestValidator
 
-from src.agents.assistant import PersonalAssistant
+from src.agents.assistant import AGENT_ERROR_REPLY, PersonalAssistant
 from src.channels.whatsapp import WhatsAppChannel
 from src.config import PORT, PUBLIC_BASE_URL, TEST_WEBHOOK_TOKEN, TWILIO_AUTH_TOKEN
+from src import database as db
 from src.database import init_database, upsert_user, save_chat_message
+from src.tools.reminders import next_due
+from src.tools.reminders.manage_reminders import USER_TZ
 from src.utils import documents
 from src.utils.google_auth import (
     get_authorization_url,
@@ -25,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Sellify Personal Assistant")
+REMINDER_POLL_SECONDS = 60
 
 os.makedirs("db", exist_ok=True)
 assistant = PersonalAssistant()
@@ -33,8 +37,21 @@ whatsapp = WhatsAppChannel()
 
 try:
     init_database()
+    _db_ready = True
 except Exception as e:
     logger.warning("Database init skipped (configure DATABASE_URL to enable): %s", e)
+    _db_ready = False
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    poller = asyncio.create_task(_reminder_loop()) if _db_ready else None
+    yield
+    if poller:
+        poller.cancel()
+
+
+app = FastAPI(title="Sellify Personal Assistant", lifespan=lifespan)
 
 
 def _twilio_signature_valid(url: str, params: dict, signature: str) -> bool:
@@ -151,6 +168,58 @@ async def _process_message(
         logger.info("Reply sent to %s: %s", phone, response[:100])
     except Exception as e:
         logger.error("Failed to send reply to %s: %s", phone, e)
+
+
+async def _reminder_loop():
+    """Poll for due reminders once a minute and deliver each in its own task,
+    so one slow agent turn doesn't hold up the others."""
+    while True:
+        try:
+            due = await asyncio.to_thread(db.claim_due_reminders)
+        except Exception as e:
+            logger.warning("Reminder poll failed: %s", e)
+            due = []
+        for reminder in due:
+            asyncio.create_task(_deliver_reminder(reminder))
+        await asyncio.sleep(REMINDER_POLL_SECONDS)
+
+
+async def _deliver_reminder(reminder: dict):
+    """Run the agent on the due reminder and send its reply to the user.
+
+    The outcome is recorded by this code from what actually happened (the
+    WhatsApp send succeeded or raised), never from what the model says.
+    """
+    phone = reminder["user_id"]
+    when = reminder["due_at"].astimezone(USER_TZ).strftime("%H:%M on %a %d %b")
+    if reminder["kind"] == "followup":
+        prompt = (
+            f"[REMINDER TRIGGER] A follow-up the user scheduled for {when} is due. "
+            f"Do this now, then message them the outcome: {reminder['text']}"
+        )
+    else:
+        prompt = f"[REMINDER TRIGGER] The user asked to be reminded at {when}: {reminder['text']}"
+
+    try:
+        reply = await assistant.ainvoke(prompt, user_phone=phone)
+        if reply == AGENT_ERROR_REPLY:
+            if reminder["kind"] != "reminder":
+                raise RuntimeError("agent turn failed")
+            # A plain reminder must still reach the user even if the model is down.
+            reply = f"Reminder: {reminder['text']}"
+        await asyncio.to_thread(whatsapp.send_message, f"whatsapp:{phone}", reply)
+    except Exception as e:
+        logger.error("Reminder %s delivery failed: %s", reminder["id"], e)
+        await asyncio.to_thread(db.finish_reminder, reminder["id"], None, str(e))
+        return
+
+    try:
+        await asyncio.to_thread(save_chat_message, phone, "assistant", reply)
+    except Exception:
+        logger.debug("Chat save skipped (no DB)")
+    following = next_due(reminder["due_at"], reminder["recurrence"])
+    await asyncio.to_thread(db.finish_reminder, reminder["id"], following)
+    logger.info("Reminder %s sent to user (next: %s)", reminder["id"], following)
 
 
 @app.post("/webhook/test")

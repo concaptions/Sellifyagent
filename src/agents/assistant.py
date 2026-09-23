@@ -17,23 +17,33 @@ from src.prompts.calendar_agent import CALENDAR_AGENT_PROMPT
 from src.prompts.notes_agent import NOTES_AGENT_PROMPT
 from src.prompts.research_agent import RESEARCH_AGENT_PROMPT
 from src.prompts.documents_agent import DOCUMENTS_AGENT_PROMPT
+from src.prompts.reminders_agent import REMINDERS_AGENT_PROMPT
 from src.tools.calendar import calendar_tools, CALENDAR_TOOL_NAMES
 from src.tools.email import email_tools, EMAIL_TOOL_NAMES
 from src.tools.notes import build_notes_tools, NOTES_TOOL_NAMES
-from src.tools.research import research_tools, RESEARCH_TOOL_NAMES
 from src.tools.documents import build_document_tools, DOCUMENT_TOOL_NAMES
+from src.tools.reminders import build_reminder_tools, REMINDER_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
 USER_TIMEZONE = "Asia/Singapore"
 
+# Returned instead of raising so a WhatsApp turn always gets a reply; the
+# scheduler compares against it to tell a failed turn from a real answer.
+AGENT_ERROR_REPLY = "Something went wrong processing your message. Please try again."
+
+# Web research uses Claude Code's built-in tools (Anthropic's server-side web
+# search, billed on the same API key) instead of a third-party search API.
+RESEARCH_TOOL_NAMES = ["WebSearch", "WebFetch"]
+
 ALL_TOOL_NAMES = (
     CALENDAR_TOOL_NAMES + EMAIL_TOOL_NAMES + NOTES_TOOL_NAMES + RESEARCH_TOOL_NAMES + DOCUMENT_TOOL_NAMES
+    + REMINDER_TOOL_NAMES
 )
 
 
 class PersonalAssistant:
-    """Wires a Claude Agent SDK manager agent with five specialist subagents.
+    """Wires a Claude Agent SDK manager agent with six specialist subagents.
 
     Authenticates with the ANTHROPIC_API_KEY in the environment (metered API
     usage); a deployed product may not run on a claude.ai subscription login.
@@ -44,6 +54,10 @@ class PersonalAssistant:
         # In-memory only; lost on restart. Fine for an MVP, but a production
         # deployment should persist this map (e.g. in pa_users.profile).
         self._sessions: dict[str, str] = {}
+        # One turn at a time per user: the reminder scheduler can start a turn
+        # while the user is mid-conversation, and two resumes of one session at
+        # once corrupt its history.
+        self._locks: dict[str, asyncio.Lock] = {}
 
     def _build_options(self, user_phone: str) -> ClaudeAgentOptions:
         current_time = datetime.now(timezone.utc).isoformat()
@@ -65,13 +79,14 @@ class PersonalAssistant:
 
         notes_tools = build_notes_tools(user_phone)
         document_tools = build_document_tools(user_phone)
+        reminder_tools = build_reminder_tools(user_phone)
 
         mcp_servers = {
             "calendar": create_sdk_mcp_server("calendar", tools=calendar_tools),
             "email": create_sdk_mcp_server("email", tools=email_tools),
             "notes": create_sdk_mcp_server("notes", tools=notes_tools),
-            "research": create_sdk_mcp_server("research", tools=research_tools),
             "documents": create_sdk_mcp_server("documents", tools=document_tools),
+            "reminders": create_sdk_mcp_server("reminders", tools=reminder_tools),
         }
 
         agents = {
@@ -100,6 +115,11 @@ class PersonalAssistant:
                 prompt=DOCUMENTS_AGENT_PROMPT.format(current_time=current_time),
                 tools=DOCUMENT_TOOL_NAMES,
             ),
+            "reminders_agent": AgentDefinition(
+                description="Schedules, lists and cancels reminders and timed follow-ups for the user.",
+                prompt=REMINDERS_AGENT_PROMPT.format(**format_kwargs),
+                tools=REMINDER_TOOL_NAMES,
+            ),
         }
 
         return ClaudeAgentOptions(
@@ -117,20 +137,22 @@ class PersonalAssistant:
         )
 
     async def ainvoke(self, message: str, user_phone: str) -> str:
-        options = self._build_options(user_phone)
-        result_text = ""
+        lock = self._locks.setdefault(user_phone, asyncio.Lock())
+        async with lock:
+            options = self._build_options(user_phone)
+            result_text = ""
 
-        try:
-            async for msg in query(prompt=message, options=options):
-                if isinstance(msg, ResultMessage):
-                    if msg.result:
-                        result_text = msg.result
-                    self._sessions[user_phone] = msg.session_id
-        except Exception as e:
-            logger.error("Assistant error for %s: %s", user_phone, e)
-            return "Something went wrong processing your message. Please try again."
+            try:
+                async for msg in query(prompt=message, options=options):
+                    if isinstance(msg, ResultMessage):
+                        if msg.result:
+                            result_text = msg.result
+                        self._sessions[user_phone] = msg.session_id
+            except Exception as e:
+                logger.error("Assistant error for %s: %s", user_phone, e)
+                return AGENT_ERROR_REPLY
 
-        return result_text or "No response generated."
+            return result_text or "No response generated."
 
     def invoke(self, message: str, user_phone: str) -> str:
         """Sync convenience wrapper. Do not call from inside a running event loop."""

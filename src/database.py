@@ -79,11 +79,27 @@ def init_database():
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
 
+            CREATE TABLE IF NOT EXISTS sellify_reminders (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'reminder',
+                text TEXT NOT NULL,
+                due_at TIMESTAMPTZ NOT NULL,
+                recurrence TEXT NOT NULL DEFAULT 'none',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INT NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_sent_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
             CREATE INDEX IF NOT EXISTS idx_sellify_users_phone ON sellify_users(phone);
+            CREATE INDEX IF NOT EXISTS idx_sellify_reminders_due ON sellify_reminders(status, due_at);
             CREATE INDEX IF NOT EXISTS idx_sellify_notes_user ON sellify_notes(user_id);
             CREATE INDEX IF NOT EXISTS idx_sellify_chat_history_user ON sellify_chat_history(user_id);
         """)
-        _lock_tables(cur, "sellify_users", "sellify_notes", "sellify_chat_history")
+        _lock_tables(cur, "sellify_users", "sellify_notes", "sellify_chat_history", "sellify_reminders")
         conn.commit()
         logger.info("Database tables initialized")
 
@@ -337,3 +353,97 @@ def get_chat_history(user_id: str, limit: int = 50) -> list[dict]:
         rows = [dict(r) for r in cur.fetchall()]
         rows.reverse()
         return rows
+
+
+# --- Reminders / proactive follow-ups --------------------------------------
+# Sellify's own table, not Cue's pa_reminders: Cue's n8n scheduler fires
+# anything in pa_reminders, so writing there during the parallel run would
+# send every reminder twice.
+
+def create_reminder(user_id: str, kind: str, text: str, due_at: datetime, recurrence: str) -> int:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO sellify_reminders (user_id, kind, text, due_at, recurrence)
+               VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+            (user_id, kind, text, due_at, recurrence),
+        )
+        return cur.fetchone()[0]
+
+
+def list_reminders(user_id: str) -> list[dict]:
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT id, kind, text, due_at, recurrence, status FROM sellify_reminders
+               WHERE user_id = %s AND status = 'pending' ORDER BY due_at LIMIT 50""",
+            (user_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def cancel_reminder(user_id: str, reminder_id: int) -> dict | None:
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """UPDATE sellify_reminders SET status = 'cancelled', updated_at = NOW()
+               WHERE id = %s AND user_id = %s AND status = 'pending'
+               RETURNING id, text, due_at""",
+            (reminder_id, user_id),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def claim_due_reminders(limit: int = 20) -> list[dict]:
+    """Atomically move due reminders from pending to sending and return them.
+
+    The claim is what stops a reminder firing twice: a second poll (or a
+    second app instance) can't pick up a row that is already 'sending', and
+    SKIP LOCKED keeps two pollers from waiting on each other. A row stuck in
+    'sending' (the app died mid-delivery) is retried after 15 minutes, at
+    most three attempts in total.
+    """
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """UPDATE sellify_reminders SET status = 'sending', attempts = attempts + 1, updated_at = NOW()
+               WHERE id IN (
+                   SELECT id FROM sellify_reminders
+                   WHERE attempts < 3 AND (
+                       (status = 'pending' AND due_at <= NOW())
+                       OR (status = 'sending' AND updated_at < NOW() - INTERVAL '15 minutes')
+                   )
+                   ORDER BY due_at LIMIT %s
+                   FOR UPDATE SKIP LOCKED
+               )
+               RETURNING id, user_id, kind, text, due_at, recurrence""",
+            (limit,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def finish_reminder(reminder_id: int, next_due: datetime | None, error: str | None = None) -> None:
+    """Record the outcome of a delivery attempt. This is done by code, never by
+    the model: a reminder is 'sent' only once the WhatsApp message went out."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        if error:
+            cur.execute(
+                """UPDATE sellify_reminders SET status = 'failed', last_error = %s, updated_at = NOW()
+                   WHERE id = %s""",
+                (error[:500], reminder_id),
+            )
+        elif next_due:
+            cur.execute(
+                """UPDATE sellify_reminders
+                   SET status = 'pending', due_at = %s, last_sent_at = NOW(), last_error = NULL, updated_at = NOW()
+                   WHERE id = %s""",
+                (next_due, reminder_id),
+            )
+        else:
+            cur.execute(
+                """UPDATE sellify_reminders SET status = 'sent', last_sent_at = NOW(), updated_at = NOW()
+                   WHERE id = %s""",
+                (reminder_id,),
+            )

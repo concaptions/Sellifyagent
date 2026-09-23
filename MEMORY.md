@@ -22,8 +22,8 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Notes | ✅ Per-user isolated; on Cue's Supabase (`sellify_notes`), live-verified 2026-09-23 |
 | Document upload (PDF/DOCX/text) | ✅ Live-verified 2026-09-23 from a real phone (4 MB PDF → 252 chunks embedded, ~1 min) and via signed replay (Q&A + delete). Stores extracted text only |
 | Webhook security | ✅ Real Twilio signatures pass (real phone); forged → 403; unsigned `/webhook/test` → 404 |
-| Web search (Tavily) | ❌ `TAVILY_API_KEY` not set on Railway |
-| Proactive follow-ups / reminders | 🚧 Not started (designed only, see Backlog) |
+| Web search | ⚠️ Rewired to Claude Code built-in `WebSearch`/`WebFetch` (no Tavily); deployed, **live result not yet confirmed** |
+| Reminders + proactive follow-ups | ⚠️ Built (`sellify_reminders`, `reminders_agent`, 60 s scheduler in `app.py`); deployed, **live fire not yet confirmed** |
 | Browser automation | 🚧 Not started (see Backlog) |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
 
@@ -38,16 +38,27 @@ WhatsApp → Twilio → POST /whatsapp/webhook (FastAPI, returns empty TwiML at 
 `POST /webhook/test` (form: phone, message) runs the same agent **synchronously**
 and returns `{"phone","reply"}` — no Twilio involved. Best way to test.
 
+Reminders: `_reminder_loop` in `app.py` (started by the FastAPI lifespan, only if DB init
+succeeded) polls every 60 s → `db.claim_due_reminders` (atomic pending→sending, SKIP LOCKED,
+retries stuck rows after 15 min, max 3 attempts) → `_deliver_reminder` runs the agent with a
+`[REMINDER TRIGGER] …` prompt → sends via WhatsApp → `db.finish_reminder` marks sent/failed/
+next occurrence **from code, never from the model**. Kinds: `reminder` (nudge; falls back to
+the raw text if the agent errors) and `followup` (agent does work first, e.g. checks Gmail).
+Business-initiated WhatsApp messages >24 h after the user's last message need a Twilio
+content template or Twilio rejects them (error 63016) — same limit Cue has.
+
 ## File map
 - `app.py` — FastAPI routes: `/whatsapp/webhook`, `/webhook/test`, `/health`,
   `/oauth/google/start`, `/oauth/google/callback`, `/oauth/google/status`
 - `src/agents/assistant.py` — builds `ClaudeAgentOptions`, per-user session ids
 - `src/prompts/*.py` — manager + 4 subagent prompts (small, principle-based)
-- `src/tools/{calendar,email,notes,research,documents}/` — SDK `@tool` functions
+- `src/tools/{calendar,email,notes,documents,reminders}/` — SDK `@tool` functions. Web research
+  has no tool module: `research_agent` uses the CLI's built-in `WebSearch`/`WebFetch`
+  (`RESEARCH_TOOL_NAMES` in `assistant.py`)
 - `src/utils/documents.py` — media download (Twilio auth only to *.twilio.com), extract, chunk, embed, ingest
 - `src/utils/google_auth.py` — web OAuth flow, PKCE verifier store, token refresh
 - `src/database.py` — Sellify's own tables `sellify_users`, `sellify_notes`, `sellify_chat_history`,
-  `sellify_documents`, `sellify_document_chunks` (pgvector 1536)
+  `sellify_reminders`, `sellify_documents`, `sellify_document_chunks` (pgvector 1536)
 - `src/channels/whatsapp.py`, `src/utils/message_splitter.py`
 - `Procfile` — `uvicorn app:app --host 0.0.0.0 --port $PORT`
 
@@ -66,7 +77,7 @@ and returns `{"phone","reply"}` — no Twilio involved. Best way to test.
   `webhook-oauth-diag` — user has not approved deleting them.
 - Env vars on Sellifyagent: ANTHROPIC_API_KEY, TWILIO_*, FROM_WHATSAPP_NUMBER, GOOGLE_CLIENT_ID/SECRET,
   GOOGLE_TOKEN_FILE, PUBLIC_BASE_URL, DATABASE_URL, OPENAI_API_KEY, TEST_WEBHOOK_TOKEN,
-  GMAIL_ADDRESS/GMAIL_APP_PASSWORD (now unused). The probe function has `TEST_WEBHOOK_TOKEN` and
+  GMAIL_ADDRESS/GMAIL_APP_PASSWORD (now unused). No TAVILY_API_KEY needed. The probe function has `TEST_WEBHOOK_TOKEN` and
   `PUBLIC_BASE_URL` as `${{Sellifyagent.*}}` refs.
 
 **Twilio** — WhatsApp number `+65 8415 1532`
@@ -127,29 +138,31 @@ subscription login is not allowed for a deployed product). Model is **not pinned
     "Got your file (N chars). Added to your canon"; Sellify replies separately.
 13. WhatsApp sends a document's filename as the message Body (and Twilio media often has no
     Content-Disposition), so `app.py` uses the Body as the filename when it looks like one.
+14. `PersonalAssistant.ainvoke` holds a per-user `asyncio.Lock`: a reminder turn and a user
+    turn resuming the same SDK session at once would corrupt it.
+15. Documents are retrieved only when the user asks (tool-based). User explicitly rejected
+    auto-retrieval on every message.
 
 ## Backlog (priority order)
-1. Confirm Gmail API send works live (send a test email via `/webhook/test`).
-2. Pin the model: `ClaudeAgentOptions(model="claude-sonnet-5")` — recommended, awaiting user OK.
-3. Proactive follow-ups (user-approved): `pa_reminders` table, `create/list/cancel_reminder`
-   tools (per-user closure like notes), background asyncio loop in `app.py` polling due rows,
-   send via the agent with a `[SYSTEM PROACTIVE TRIGGER]` message, mark sent/failed in DB
-   (never rely on the model to mark it done).
-4. Browser automation (user-approved) — Phase A: read-only browsing tool (Playwright, headless,
-   no stored credentials). Phase B (logged-in actions, stored credentials, payments):
-   **needs explicit user decisions on credential storage, allowed sites, and a confirm-before-act
-   gate — do not build on assumptions.**
-5. Set `TAVILY_API_KEY` (user must supply the key).
-6. Document upload follow-ups: auto-retrieve relevant chunks every turn (V1 is
-   tool-based); scanned PDFs via OCR/vision; per-tier storage caps; staleness nudges; when Canon
-   promotion is built, Canon facts must store a source-document id so deleting a doc flags them
-   for the user; keep original files only if needed (then private Supabase Storage).
-7. Cue feature parity: Canon/RAG (pgvector), reminders, personal log, personas, photo/PDF
-   ingestion, per-user Google tokens, prompt parity.
-8. Delete now-unused `GMAIL_ADDRESS`/`GMAIL_APP_PASSWORD` on Railway; user should rotate that
+1. Confirm live: Gmail API send, WebSearch reply, a reminder firing to a real phone.
+2. Reminders outside Twilio's 24 h window: register a WhatsApp content template and send
+   reminders via it (else they fail with 63016). Persist `_sessions` so proactive turns keep
+   context across restarts.
+3. Pin the model: `ClaudeAgentOptions(model="claude-sonnet-5")` — recommended, awaiting user OK.
+4. Browser automation. Phase A (read-only browsing) is effectively covered by `WebFetch`.
+   Phase B (bookings: logged-in actions, forms, payments) **needs explicit user decisions on
+   credential storage, allowed sites, and a confirm-before-act gate — do not build on
+   assumptions.** Design: separate Playwright worker service, per-user encrypted credentials,
+   agent proposes → user confirms on WhatsApp → worker acts → screenshot proof.
+5. Document upload follow-ups: scanned PDFs via OCR/vision; per-tier storage caps; staleness
+   nudges; when Canon promotion is built, Canon facts must store a source-document id so
+   deleting a doc flags them; keep original files only if needed (private Supabase Storage).
+6. Cue feature parity: Canon/RAG read, personal log, personas, photo ingestion, per-user
+   Google tokens, prompt parity.
+7. Delete now-unused `GMAIL_ADDRESS`/`GMAIL_APP_PASSWORD` on Railway; user should rotate that
    Gmail password (it was shared in plaintext in chat).
-9. Merge PR #1 so `main` has the code; clean up leftover Railway test services (ask first).
-10. Retire the n8n Cue path when the user decides (disable the n8n trigger, not just the Twilio sub).
+8. Merge PR #1 so `main` has the code; clean up leftover Railway test services (ask first).
+9. Retire the n8n Cue path when the user decides (disable the n8n trigger, not just the Twilio sub).
 
 ## Decision log
 - 2026-09-21 Switched LangGraph → Claude Agent SDK (native subagents).
@@ -162,6 +175,9 @@ subscription login is not allowed for a deployed product). Model is **not pinned
   rest, one-step deletion. Embeddings = OpenAI text-embedding-3-small to match Cue's Canon.
 - 2026-09-23 Sellify = Cue migration. DB moved to Cue's Supabase; Sellify writes only `sellify_*`
   tables until n8n Cue is switched off.
+- 2026-09-23 Web search via Claude's built-in WebSearch/WebFetch, not Tavily (one API bill, no
+  extra key). Reminders live in `sellify_reminders` (not `pa_reminders`: Cue's scheduler would
+  double-fire). Document retrieval stays on-demand only (user decision).
 
 ## Maintaining this file
 At the end of any session that changes code, infra, credentials setup, or plans: update
