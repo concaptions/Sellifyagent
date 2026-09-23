@@ -10,7 +10,7 @@ import uvicorn
 from twilio.request_validator import RequestValidator
 
 from src.agents.assistant import AGENT_ERROR_REPLY, PersonalAssistant
-from src.channels.whatsapp import WhatsAppChannel
+from src.channels.whatsapp import TYPING_REFRESH_SECONDS, WhatsAppChannel
 from src.config import PORT, PUBLIC_BASE_URL, TEST_WEBHOOK_TOKEN, TWILIO_AUTH_TOKEN
 from src import database as db
 from src.database import init_database, upsert_user, save_chat_message
@@ -53,7 +53,7 @@ async def lifespan(_: FastAPI):
         poller.cancel()
 
 
-app = FastAPI(title="Sellify Personal Assistant", lifespan=lifespan)
+app = FastAPI(title="Cue (Sellify)", lifespan=lifespan)
 
 
 def _twilio_signature_valid(url: str, params: dict, signature: str) -> bool:
@@ -173,11 +173,15 @@ async def _process_message(
     except Exception:
         logger.debug("Chat save skipped (no DB)")
 
+    typing = asyncio.create_task(_keep_typing(message_sid)) if message_sid else None
     try:
         response = await assistant.ainvoke(message, user_phone=phone)
     except Exception as e:
         logger.error("Assistant error: %s", e)
         response = "Something went wrong. Please try again."
+    finally:
+        if typing:
+            typing.cancel()
 
     try:
         await asyncio.to_thread(save_chat_message, phone, "assistant", response)
@@ -189,6 +193,16 @@ async def _process_message(
         logger.info("Reply sent to %s: %s", phone, response[:100])
     except Exception as e:
         logger.error("Failed to send reply to %s: %s", phone, e)
+
+
+async def _keep_typing(message_sid: str):
+    """Keep the "typing…" indicator on the user's screen until the reply is
+    sent (the caller cancels this task). Stops early if Twilio refuses it,
+    e.g. an account without the beta, rather than retrying every 20 s."""
+    while True:
+        if not await asyncio.to_thread(whatsapp.send_typing, message_sid):
+            return
+        await asyncio.sleep(TYPING_REFRESH_SECONDS)
 
 
 def _own_media_urls(text: str) -> list[str]:
