@@ -26,7 +26,7 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Reminders + proactive follow-ups | ✅ `sellify_reminders` + `reminders_agent` + 60 s scheduler; live-verified 2026-09-23 via `/webhook/test`. Repeating reminders: min every 10 min, created only after the user OKs the schedule, every message carries "Reply *stop*", and "stop" is handled in `app.py` code. **Not yet fired to a real phone** |
 | Booking worker (browser) | ✅ `browser_agent` + Playwright (Dockerfile on Playwright image). Guest bookings only; login/password/card fields blocked in code; final click locked until the user's own "yes" (`src/utils/approvals.py`); screenshot proof via `/media/<token>.png`. Live-verified 2026-09-23 on httpbin's form: fill → approval question + screenshot → "no" declines → "yes" submits → result screenshot served |
 | Typing indicator | ✅ `_keep_typing` in `app.py` calls Twilio's typing-indicator API (public beta) every 20 s during a turn; 200 OK on real messages 2026-09-23 |
-| Database Q&A (`data_agent`) | ⚠️ Per-user Cue records (`pa_logs`, `pa_personas`, `pa_reminders`, `n8n_chat_histories` keyed `pa-<phone>`) for everyone; business tables (`leads`, `products`, `documents`) **only for phones in `BUSINESS_DATA_PHONES`** (Railway env var, unset = nobody), read-only via Postgres role `sellify_reader` + READ ONLY txn. Local tests pass; **live test pending; user must set `BUSINESS_DATA_PHONES`** |
+| Database Q&A (`data_agent`) | ✅ Per-user Cue records (`pa_logs`, `pa_personas`, `pa_reminders`, `n8n_chat_histories` keyed `pa-<phone>`) for everyone; business tables (`leads`, `products`, `documents`) **only for phones in `BUSINESS_DATA_PHONES`** (Railway env var), read-only via Postgres role `sellify_reader` (SELECT grant + RLS policy, READ ONLY txn). Live-verified 2026-09-23 (lead funnel, September count, catalogue, KB; writes and outsiders refused). **`BUSINESS_DATA_PHONES` currently holds only a synthetic test number — user must put the real owner numbers in** |
 | Name | ✅ Assistant introduces itself as **Cue** (manager prompt) |
 | Personal memory | ✅ `memory_agent` saves facts to `sellify_users.profile`; profile (+ Cue's `pa_users` name/timezone/core_prompt) injected into every turn; per-user timezone drives reminders. Live-verified 2026-09-23 (save without asking, recall, correction, reminder in user's tz) |
 | Cue's earlier documents | ⚠️ `documents_agent` lists/searches `pa_knowledge_chunks` (read-only) via `match_cue_knowledge`, keyed by `pa_users.id`. Live: no-history path verified; **real-user listing/search to be confirmed from the user's phone** (test scripts must not carry real numbers) |
@@ -185,6 +185,9 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 17. Timezones are per user: `profile["timezone"]` (fact > Cue's `pa_users.timezone` > column
     default Asia/Singapore). `USER_TIMEZONE` in assistant.py is only the last-resort default.
     The dev is in Pakistan, the client in Singapore — never assume one timezone.
+19. Supabase's `postgres` login is not a superuser: `SET ROLE` needs `GRANT role TO CURRENT_USER`,
+    and RLS applies to every non-owner role (zero rows, no error) — hence the reader policy.
+    Never bind parameters around model-written SQL (psycopg2 reads its `%` as placeholders).
 18. A tool-builder signature mismatch (`build_reminder_tools`) once broke every turn after
     deploy with a 500. Before pushing agent/tool changes, run the full-options smoke check:
     `PersonalAssistant()._build_options(phone, profile)` for `{}` and a populated profile.
