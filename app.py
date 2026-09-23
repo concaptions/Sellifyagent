@@ -126,6 +126,23 @@ def _looks_like_filename(text: str) -> bool:
     return bool(re.fullmatch(r"[^\n/\\]{1,200}\.(pdf|docx|txt|csv)", text.strip(), re.IGNORECASE))
 
 
+async def _prepare_message(phone: str, message: str) -> str:
+    """Settle, in code, the two things a user can say that must take effect
+    whether or not the model cooperates: approving/declining a pending
+    booking, and "stop" for repeating reminders. The outcome is reported to
+    the agent as a leading [SYSTEM: ...] line. Shared by the WhatsApp path
+    and /webhook/test so tests exercise exactly what production runs."""
+    system_line = booking_gate.resolve_from_message(phone, message)
+    if not system_line and _STOP_WORDS.match(message):
+        try:
+            stopped = await asyncio.to_thread(db.stop_reminders, phone, True)
+        except Exception:
+            stopped = 0
+        if stopped:
+            system_line = f"[SYSTEM: the user replied stop; {stopped} repeating reminder(s) were cancelled. Confirm in one line.]"
+    return f"{system_line}\n\n{message}" if system_line else message
+
+
 async def _process_message(
     phone: str,
     message: str,
@@ -144,20 +161,7 @@ async def _process_message(
         ]
         message = "\n".join(notes) + ("\n\n" + message if message else "")
 
-    # Two things the user can say that must take effect whether or not the
-    # model cooperates: approving/declining a pending booking, and "stop" for
-    # repeating reminders. Both are settled here and reported to the agent as
-    # a [SYSTEM: ...] line.
-    system_line = booking_gate.resolve_from_message(phone, message)
-    if not system_line and _STOP_WORDS.match(message):
-        try:
-            stopped = await asyncio.to_thread(db.stop_reminders, phone, True)
-        except Exception:
-            stopped = 0
-        if stopped:
-            system_line = f"[SYSTEM: the user replied stop; {stopped} repeating reminder(s) were cancelled. Confirm in one line.]"
-    if system_line:
-        message = f"{system_line}\n\n{message}"
+    message = await _prepare_message(phone, message)
 
     try:
         await asyncio.to_thread(upsert_user, phone)
@@ -267,6 +271,7 @@ async def test_webhook(
     Requires the X-Test-Token header: it can act as any user."""
     if not TEST_WEBHOOK_TOKEN or x_test_token != TEST_WEBHOOK_TOKEN:
         raise HTTPException(status_code=404)
+    message = await _prepare_message(phone, message)
     response = await assistant.ainvoke(message, user_phone=phone)
     return {"phone": phone, "reply": response}
 
