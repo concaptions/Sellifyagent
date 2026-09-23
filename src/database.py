@@ -289,6 +289,113 @@ def upsert_user(phone: str, name: str | None = None) -> dict:
         return dict(cur.fetchone())
 
 
+def get_profile(phone: str) -> dict:
+    """What Sellify knows about a user: its own sellify_users row merged with
+    the read-only bits of Cue's pa_users (name, timezone, core_prompt), so a
+    user who set Cue up under n8n is recognised here without being asked
+    again. Sellify's own values win when both exist."""
+    out: dict = {"name": None, "timezone": None, "facts": {}, "core_prompt": None, "persona": None, "cue_user_id": None}
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute(
+                "SELECT id, name, timezone, persona_name, profile->>'core_prompt' AS core_prompt FROM pa_users WHERE phone = %s",
+                (phone,),
+            )
+            cue = cur.fetchone()
+        except Exception:
+            conn.rollback()
+            cue = None
+        if cue:
+            # Cue keys everything else (knowledge chunks, logs, personas) by
+            # this uuid, not by phone.
+            out.update(
+                cue_user_id=str(cue["id"]), name=cue["name"], timezone=cue["timezone"],
+                core_prompt=cue["core_prompt"], persona=cue["persona_name"],
+            )
+        cur.execute("SELECT name, timezone, profile FROM sellify_users WHERE phone = %s", (phone,))
+        mine = cur.fetchone()
+        if mine:
+            facts = dict(mine["profile"] or {})
+            out["facts"] = facts
+            out["name"] = facts.get("name") or mine["name"] or out["name"]
+            # The column has a default, so only a timezone the user actually
+            # told us (in facts) may override the one Cue already had.
+            out["timezone"] = facts.get("timezone") or out["timezone"] or mine["timezone"]
+    return out
+
+
+def remember_facts(phone: str, facts: dict) -> dict:
+    """Merge facts into the user's profile. 'name' and 'timezone' also land in
+    their own columns so other code can read them without parsing JSON."""
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """INSERT INTO sellify_users (phone, name, timezone, profile)
+               VALUES (%s, %s, COALESCE(%s, 'Asia/Singapore'), %s::jsonb)
+               ON CONFLICT (phone) DO UPDATE SET
+                   profile = COALESCE(sellify_users.profile, '{}'::jsonb) || EXCLUDED.profile,
+                   name = COALESCE(EXCLUDED.profile->>'name', sellify_users.name),
+                   timezone = COALESCE(EXCLUDED.profile->>'timezone', sellify_users.timezone),
+                   updated_at = NOW()
+               RETURNING profile""",
+            (phone, facts.get("name"), facts.get("timezone"), json.dumps(facts)),
+        )
+        return dict(cur.fetchone()["profile"] or {})
+
+
+def forget_fact(phone: str, key: str) -> bool:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """UPDATE sellify_users SET profile = COALESCE(profile, '{}'::jsonb) - %s, updated_at = NOW()
+               WHERE phone = %s AND profile ? %s""",
+            (key, phone, key),
+        )
+        return cur.rowcount > 0
+
+
+# --- Cue's knowledge base (read-only) ---------------------------------------
+# Documents the user gave the n8n Cue live in pa_knowledge_chunks, keyed by
+# pa_users.id. Sellify reads them so nothing the user stored before is lost;
+# it never writes there (see the parallel-run rule at the top of this file).
+
+def list_canon_sources(cue_user_id: str) -> list[dict]:
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT source, COUNT(*)::int AS chunks, MIN(created_at) AS created_at,
+                      SUM(LENGTH(content))::int AS char_count
+               FROM pa_knowledge_chunks WHERE user_id = %s::uuid
+               GROUP BY source ORDER BY MIN(created_at)""",
+            (cue_user_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def search_canon(cue_user_id: str, query: str, query_embedding: list[float] | None, limit: int) -> list[dict]:
+    """Semantic search through Cue's match_cue_knowledge (which itself fails
+    closed without a user_id filter), keyword fallback without an embedding."""
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if query_embedding:
+            cur.execute(
+                """SELECT k.source, k.section, k.chunk_index, m.content, m.similarity
+                   FROM match_cue_knowledge(%s::vector, %s, %s::jsonb) m
+                   JOIN pa_knowledge_chunks k ON k.id = m.id AND k.user_id = %s::uuid""",
+                (_vector_literal(query_embedding), limit, json.dumps({"user_id": cue_user_id}), cue_user_id),
+            )
+        else:
+            cur.execute(
+                """SELECT source, section, chunk_index, content, NULL::float AS similarity
+                   FROM pa_knowledge_chunks
+                   WHERE user_id = %s::uuid AND content ILIKE %s
+                   ORDER BY source, chunk_index LIMIT %s""",
+                (cue_user_id, f"%{query}%", limit),
+            )
+        return [dict(r) for r in cur.fetchall()]
+
+
 def get_user(phone: str) -> dict | None:
     with get_db() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)

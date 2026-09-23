@@ -14,8 +14,7 @@ from src.channels.whatsapp import TYPING_REFRESH_SECONDS, WhatsAppChannel
 from src.config import PORT, PUBLIC_BASE_URL, TEST_WEBHOOK_TOKEN, TWILIO_AUTH_TOKEN
 from src import database as db
 from src.database import init_database, upsert_user, save_chat_message
-from src.tools.reminders import next_due
-from src.tools.reminders.manage_reminders import USER_TZ
+from src.tools.reminders import next_due, user_tz
 from src.utils import documents, media_store
 from src.utils.approvals import booking_gate
 from src.utils.google_auth import (
@@ -241,7 +240,11 @@ async def _deliver_reminder(reminder: dict):
     WhatsApp send succeeded or raised), never from what the model says.
     """
     phone = reminder["user_id"]
-    when = reminder["due_at"].astimezone(USER_TZ).strftime("%H:%M on %a %d %b")
+    try:
+        tz = user_tz((await asyncio.to_thread(db.get_profile, phone)).get("timezone"))
+    except Exception:
+        tz = user_tz(None)
+    when = reminder["due_at"].astimezone(tz).strftime("%H:%M on %a %d %b")
     if reminder["kind"] == "followup":
         prompt = (
             f"[REMINDER TRIGGER] A follow-up the user scheduled for {when} is due. "
@@ -270,7 +273,7 @@ async def _deliver_reminder(reminder: dict):
         await asyncio.to_thread(save_chat_message, phone, "assistant", reply)
     except Exception:
         logger.debug("Chat save skipped (no DB)")
-    following = next_due(reminder["due_at"], reminder["recurrence"])
+    following = next_due(reminder["due_at"], reminder["recurrence"], tz)
     await asyncio.to_thread(db.finish_reminder, reminder["id"], following)
     logger.info("Reminder %s sent to user (next: %s)", reminder["id"], following)
 

@@ -26,13 +26,22 @@ DELETE_DOCUMENT_SCHEMA = {
 }
 
 
-def _list_documents(user_id: str) -> str:
+def _canon_label(source: str) -> str:
+    """Cue named uploads 'upload:<filename or Twilio media sid>' and its core
+    knowledge file 'canon'."""
+    if source == "canon":
+        return "Cue core knowledge (canon)"
+    if source.startswith("upload:"):
+        name = source[len("upload:"):]
+        return f"file sent via WhatsApp ({name[:8]}…)" if name.startswith("MM") and len(name) > 20 else name
+    return source
+
+
+def _list_documents(user_id: str, cue_user_id: str | None) -> str:
     try:
         docs = db.list_documents(user_id)
     except Exception as e:
         return f"Error listing documents: {e}"
-    if not docs:
-        return "The user has no saved documents."
     lines = []
     for d in docs:
         status = "" if d["status"] == "active" else f" ({d['status']}, not searched)"
@@ -40,20 +49,45 @@ def _list_documents(user_id: str) -> str:
             f"- [id: {d['id']}] {d['filename']} — uploaded {d['created_at']:%Y-%m-%d}, "
             f"{d['char_count'] or 0:,} characters{status}"
         )
-    return f"{len(docs)} saved document(s):\n" + "\n".join(lines)
+    earlier = []
+    if cue_user_id:
+        try:
+            earlier = db.list_canon_sources(cue_user_id)
+        except Exception as e:
+            earlier = [{"error": str(e)}]
+    if not lines and not earlier:
+        return "The user has no saved documents."
+    out = f"{len(docs)} document(s) stored here:\n" + ("\n".join(lines) if lines else "- none")
+    if earlier:
+        if "error" in earlier[0]:
+            out += f"\n\nEarlier documents could not be read: {earlier[0]['error']}"
+        else:
+            out += f"\n\n{len(earlier)} earlier document(s) from before the move (searchable, read-only, can't be deleted here):\n" + "\n".join(
+                f"- {_canon_label(e['source'])} — added {e['created_at']:%Y-%m-%d}, {e['char_count']:,} characters"
+                for e in earlier
+            )
+    return out
 
 
-def _search_documents(user_id: str, query: str, max_results: int) -> str:
+def _search_documents(user_id: str, cue_user_id: str | None, query: str, max_results: int) -> str:
+    embedding = embed_query(query)
+    parts, errors = [], []
     try:
-        rows = db.search_document_chunks(user_id, query, embed_query(query), max_results)
+        for r in db.search_document_chunks(user_id, query, embedding, max_results):
+            parts.append(f"[{r['filename']} (id {r['document_id']}), part {r['chunk_index'] + 1}]\n{r['content']}")
     except Exception as e:
-        return f"Error searching documents: {e}"
-    if not rows:
-        return f"Nothing in the user's documents matches '{query}'."
-    parts = []
-    for r in rows:
-        parts.append(f"[{r['filename']} (id {r['document_id']}), part {r['chunk_index'] + 1}]\n{r['content']}")
-    return "\n\n---\n\n".join(parts)
+        errors.append(f"documents stored here: {e}")
+    if cue_user_id:
+        try:
+            for r in db.search_canon(cue_user_id, query, embedding, max_results):
+                where = f", {r['section']}" if r.get("section") else ""
+                parts.append(f"[earlier document: {_canon_label(r['source'])}{where}, part {(r['chunk_index'] or 0) + 1}]\n{r['content']}")
+        except Exception as e:
+            errors.append(f"earlier documents: {e}")
+    if not parts:
+        msg = f"Nothing in the user's documents matches '{query}'."
+        return msg + (" (Search errors: " + "; ".join(errors) + ")" if errors else "")
+    return "\n\n---\n\n".join(parts) + ("\n\n(Search errors: " + "; ".join(errors) + ")" if errors else "")
 
 
 def _delete_document(user_id: str, document_id: int) -> str:
@@ -66,13 +100,13 @@ def _delete_document(user_id: str, document_id: int) -> str:
     return f"Deleted '{filename}' (id {document_id}) and all its stored text permanently."
 
 
-def build_document_tools(user_id: str) -> list[SdkMcpTool]:
+def build_document_tools(user_id: str, cue_user_id: str | None = None) -> list[SdkMcpTool]:
     """Document tools bound to one user's phone number via closure, like the
     notes tools, so a turn can only ever see or delete its own user's files."""
 
-    @tool("list_documents", "List the documents the user has sent and that are stored for them.", LIST_DOCUMENTS_SCHEMA)
+    @tool("list_documents", "List the user's stored documents: ones sent here and earlier ones from before the move.", LIST_DOCUMENTS_SCHEMA)
     async def list_documents(args: dict) -> dict:
-        result = await asyncio.to_thread(_list_documents, user_id)
+        result = await asyncio.to_thread(_list_documents, user_id, cue_user_id)
         return {"content": [{"type": "text", "text": result}]}
 
     @tool(
@@ -81,7 +115,7 @@ def build_document_tools(user_id: str) -> list[SdkMcpTool]:
         SEARCH_DOCUMENTS_SCHEMA,
     )
     async def search_documents(args: dict) -> dict:
-        result = await asyncio.to_thread(_search_documents, user_id, args["query"], args.get("max_results") or 5)
+        result = await asyncio.to_thread(_search_documents, user_id, cue_user_id, args["query"], args.get("max_results") or 5)
         return {"content": [{"type": "text", "text": result}]}
 
     @tool(

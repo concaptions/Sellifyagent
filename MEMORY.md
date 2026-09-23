@@ -27,6 +27,8 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Booking worker (browser) | ✅ `browser_agent` + Playwright (Dockerfile on Playwright image). Guest bookings only; login/password/card fields blocked in code; final click locked until the user's own "yes" (`src/utils/approvals.py`); screenshot proof via `/media/<token>.png`. Live-verified 2026-09-23 on httpbin's form: fill → approval question + screenshot → "no" declines → "yes" submits → result screenshot served |
 | Typing indicator | ⚠️ `_keep_typing` in `app.py` calls Twilio's typing-indicator API (public beta) every 20 s during a turn; deployed, **not yet seen working from a real phone** (needs a real inbound MessageSid) |
 | Name | ✅ Assistant introduces itself as **Cue** (manager prompt) |
+| Personal memory | ⚠️ `memory_agent` saves facts to `sellify_users.profile`; profile (+ Cue's `pa_users` name/timezone/core_prompt) injected into every turn; per-user timezone drives reminders. **Live test pending** |
+| Cue's earlier documents | ⚠️ `documents_agent` lists/searches `pa_knowledge_chunks` (read-only) via `match_cue_knowledge`, keyed by `pa_users.id`. **Live test pending** |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
 
 ## Request flow
@@ -63,7 +65,10 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
   `/oauth/google/start`, `/oauth/google/callback`, `/oauth/google/status`
 - `src/agents/assistant.py` — builds `ClaudeAgentOptions`, per-user session ids
 - `src/prompts/*.py` — manager + 4 subagent prompts (small, principle-based)
-- `src/tools/{calendar,email,notes,documents,reminders,browser}/` — SDK `@tool` functions. Web research
+- `src/tools/{calendar,email,notes,documents,reminders,browser,memory}/` — SDK `@tool` functions.
+  `memory/profile.py`: `remember/forget/recall` + `format_profile` (the "What you know about the
+  user" block in the manager prompt). `db.get_profile(phone)` merges `sellify_users` with Cue's
+  `pa_users` (read-only); facts the user stated win over Cue's values. Web research
   has no tool module: `research_agent` uses the CLI's built-in `WebSearch`/`WebFetch`
   (`RESEARCH_TOOL_NAMES` in `assistant.py`)
 - `src/utils/documents.py` — media download (Twilio auth only to *.twilio.com), extract, chunk, embed, ingest
@@ -117,9 +122,16 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
 **Cue's Supabase (shared DB)** — Cue n8n owns and still writes:
 - `pa_users` (phone, name, timezone, persona_name, profile jsonb: core_prompt, active_persona,
   google_tokens — must stay a JSON *object*), `pa_personas`, `pa_reminders`, `n8n_chat_histories`
-- `pa_knowledge_chunks` (Canon: `embedding vector(1536)`, OpenAI `text-embedding-3-small`,
-  ~1200-char chunks) + `match_cue_knowledge(query_embedding, match_count, filter)` — fails closed
-  without `filter.user_id`.
+- `pa_knowledge_chunks` (`id uuid, user_id uuid = pa_users.id`, `source` = `canon` |
+  `upload:<name or MM… media sid>`, `section`, `chunk_index`, `content`, `embedding vector(1536)`
+  OpenAI `text-embedding-3-small`, `metadata`, `created_at`) +
+  `match_cue_knowledge(query_embedding vector, match_count int = 6, filter jsonb)` →
+  `TABLE(id uuid, content, metadata, similarity)`; fails closed without `filter.user_id` (the uuid).
+  Sellify reads these via `db.list_canon_sources` / `db.search_canon` using
+  `profile["cue_user_id"]` from `db.get_profile`.
+- `pa_reminders` cols: `id,user_id,title,notes,due_at,status,fired_at,recurrence,created_at,updated_at,repeat_until`;
+  `pa_logs`: `id,user_id,kind,logged_at,value_num,data,note,source,sheet_synced_at,created_at`;
+  `pa_personas`: `id,user_id,name,slug,description,content,…`.
 - All `sellify_*` tables have RLS enabled with no policies (set at startup) so Supabase's public
   REST API/anon key can't read them; the app connects as table owner and bypasses RLS. Any new
   table must be added to `_lock_tables` in `src/database.py`. The DB also holds unrelated
@@ -163,14 +175,16 @@ subscription login is not allowed for a deployed product). Model is **not pinned
     turn resuming the same SDK session at once would corrupt it.
 15. Documents are retrieved only when the user asks (tool-based). User explicitly rejected
     auto-retrieval on every message.
+17. Timezones are per user: `profile["timezone"]` (fact > Cue's `pa_users.timezone` > column
+    default Asia/Singapore). `USER_TIMEZONE` in assistant.py is only the last-resort default.
+    The dev is in Pakistan, the client in Singapore — never assume one timezone.
 16. Playwright's sync API can't be used from the asyncio loop; the browser tools use the async
     API in-process (SDK tools run in the app's loop). Chromium as root needs `--no-sandbox`. In
     this sandbox set `PLAYWRIGHT_CHROMIUM_PATH=/opt/pw-browsers/chromium` to test locally.
 
 ## Backlog (priority order)
-1. Confirm from a real phone: Gmail API send; a reminder arriving; the typing indicator
-   (check app logs for "Typing indicator refused" — the account may need the beta enabled).
-   User to deactivate the n8n Cue workflows in the n8n UI.
+1. Confirm from a real phone: Gmail API send; a reminder arriving. Typing indicator ✅ (200 OK on
+   real messages 2026-09-23). User to deactivate the n8n Cue workflows in the n8n UI.
 2. Cue prompt parity: port the voice/rules from the handover `system-prompt.md`, personas,
    core_prompt from `pa_users.profile`. Reminders outside Twilio's 24 h window: register a WhatsApp content template and send
    reminders via it (else they fail with 63016). Persist `_sessions` so proactive turns keep
@@ -204,6 +218,8 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 - 2026-09-23 Web search via Claude's built-in WebSearch/WebFetch, not Tavily (one API bill, no
   extra key). Reminders live in `sellify_reminders` (not `pa_reminders`: Cue's scheduler would
   double-fire). Document retrieval stays on-demand only (user decision).
+- 2026-09-23 Personal memory in `sellify_users.profile` (not `pa_users.profile`, which n8n still
+  writes); Cue's earlier documents read in place from `pa_knowledge_chunks`, not migrated.
 - 2026-09-23 n8n Cue path switched off (Twilio subscription deleted, user decision); assistant
   renamed Cue; typing indicator added (Twilio beta endpoint, best effort).
 - 2026-09-23 Booking worker (user-approved): guest bookings only, in the app process (Dockerfile

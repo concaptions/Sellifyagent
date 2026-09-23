@@ -19,12 +19,16 @@ from src.prompts.research_agent import RESEARCH_AGENT_PROMPT
 from src.prompts.documents_agent import DOCUMENTS_AGENT_PROMPT
 from src.prompts.reminders_agent import REMINDERS_AGENT_PROMPT
 from src.prompts.browser_agent import BROWSER_AGENT_PROMPT
+from src.prompts.memory_agent import MEMORY_AGENT_PROMPT
 from src.tools.calendar import calendar_tools, CALENDAR_TOOL_NAMES
 from src.tools.email import email_tools, EMAIL_TOOL_NAMES
 from src.tools.notes import build_notes_tools, NOTES_TOOL_NAMES
 from src.tools.documents import build_document_tools, DOCUMENT_TOOL_NAMES
 from src.tools.reminders import build_reminder_tools, REMINDER_TOOL_NAMES
 from src.tools.browser import build_browser_tools, BROWSER_TOOL_NAMES
+from src.tools.memory import build_memory_tools, MEMORY_TOOL_NAMES
+from src.tools.memory.profile import format_profile
+from src import database as db
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +44,12 @@ RESEARCH_TOOL_NAMES = ["WebSearch", "WebFetch"]
 
 ALL_TOOL_NAMES = (
     CALENDAR_TOOL_NAMES + EMAIL_TOOL_NAMES + NOTES_TOOL_NAMES + RESEARCH_TOOL_NAMES + DOCUMENT_TOOL_NAMES
-    + REMINDER_TOOL_NAMES + BROWSER_TOOL_NAMES
+    + REMINDER_TOOL_NAMES + BROWSER_TOOL_NAMES + MEMORY_TOOL_NAMES
 )
 
 
 class PersonalAssistant:
-    """Wires a Claude Agent SDK manager agent with seven specialist subagents.
+    """Wires a Claude Agent SDK manager agent with eight specialist subagents.
 
     Authenticates with the ANTHROPIC_API_KEY in the environment (metered API
     usage); a deployed product may not run on a claude.ai subscription login.
@@ -61,9 +65,14 @@ class PersonalAssistant:
         # once corrupt its history.
         self._locks: dict[str, asyncio.Lock] = {}
 
-    def _build_options(self, user_phone: str) -> ClaudeAgentOptions:
+    def _build_options(self, user_phone: str, profile: dict) -> ClaudeAgentOptions:
         current_time = datetime.now(timezone.utc).isoformat()
-        format_kwargs = {"current_time": current_time, "user_timezone": USER_TIMEZONE}
+        user_timezone = profile.get("timezone") or USER_TIMEZONE
+        format_kwargs = {
+            "current_time": current_time,
+            "user_timezone": user_timezone,
+            "user_profile": format_profile(profile) or "(nothing yet — learn as you go)",
+        }
 
         # Never rely on ambient session state (e.g. a CLAUDE_CODE_SESSION_ID
         # left in the process environment) to decide which conversation a
@@ -80,9 +89,10 @@ class PersonalAssistant:
             self._sessions[user_phone] = new_session_id
 
         notes_tools = build_notes_tools(user_phone)
-        document_tools = build_document_tools(user_phone)
-        reminder_tools = build_reminder_tools(user_phone)
+        document_tools = build_document_tools(user_phone, profile.get("cue_user_id"))
+        reminder_tools = build_reminder_tools(user_phone, user_timezone)
         browser_tools = build_browser_tools(user_phone)
+        memory_tools = build_memory_tools(user_phone)
 
         mcp_servers = {
             "calendar": create_sdk_mcp_server("calendar", tools=calendar_tools),
@@ -91,6 +101,7 @@ class PersonalAssistant:
             "documents": create_sdk_mcp_server("documents", tools=document_tools),
             "reminders": create_sdk_mcp_server("reminders", tools=reminder_tools),
             "browser": create_sdk_mcp_server("browser", tools=browser_tools),
+            "memory": create_sdk_mcp_server("memory", tools=memory_tools),
         }
 
         agents = {
@@ -124,6 +135,11 @@ class PersonalAssistant:
                 prompt=REMINDERS_AGENT_PROMPT.format(**format_kwargs),
                 tools=REMINDER_TOOL_NAMES,
             ),
+            "memory_agent": AgentDefinition(
+                description="Saves, updates and recalls what is known about the user: name, age, weight, family, preferences, timezone.",
+                prompt=MEMORY_AGENT_PROMPT.format(current_time=current_time),
+                tools=MEMORY_TOOL_NAMES,
+            ),
             "browser_agent": AgentDefinition(
                 description="Makes guest bookings on public websites with a headless browser: restaurants, appointments, slots. No logins or payments.",
                 prompt=BROWSER_AGENT_PROMPT.format(**format_kwargs),
@@ -148,7 +164,12 @@ class PersonalAssistant:
     async def ainvoke(self, message: str, user_phone: str) -> str:
         lock = self._locks.setdefault(user_phone, asyncio.Lock())
         async with lock:
-            options = self._build_options(user_phone)
+            try:
+                profile = await asyncio.to_thread(db.get_profile, user_phone)
+            except Exception:
+                logger.debug("Profile load skipped (no DB)", exc_info=True)
+                profile = {}
+            options = self._build_options(user_phone, profile)
             result_text = ""
 
             try:

@@ -9,7 +9,14 @@ from claude_agent_sdk import tool, SdkMcpTool
 
 from src import database as db
 
-USER_TZ = ZoneInfo("Asia/Singapore")
+DEFAULT_TZ = "Asia/Singapore"
+
+
+def user_tz(name: str | None) -> ZoneInfo:
+    try:
+        return ZoneInfo(name or DEFAULT_TZ)
+    except Exception:
+        return ZoneInfo(DEFAULT_TZ)
 RECURRENCES = ("none", "interval", "daily", "weekly", "monthly")
 MIN_INTERVAL_MINUTES = 10
 KINDS = ("reminder", "followup")
@@ -68,23 +75,23 @@ CANCEL_REMINDER_SCHEMA = {
 }
 
 
-def _parse_due(value: str) -> datetime:
+def _parse_due(value: str, tz: ZoneInfo) -> datetime:
     due = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     if due.tzinfo is None:
         # The model was told to include an offset; if it didn't, the user's
         # local time is the only sensible reading.
-        due = due.replace(tzinfo=USER_TZ)
+        due = due.replace(tzinfo=tz)
     return due
 
 
-def next_due(due: datetime, recurrence: str) -> datetime | None:
+def next_due(due: datetime, recurrence: str, tz: ZoneInfo) -> datetime | None:
     """Next occurrence after `due`, stepping in the user's timezone so a
     9:00 reminder stays at 9:00 local. Returns None for one-off reminders.
     `every:N` repeats every N minutes (N >= 10, clamped here as well as at
     creation so a repeating reminder can never turn into a flood)."""
     if recurrence == "none":
         return None
-    local = due.astimezone(USER_TZ)
+    local = due.astimezone(tz)
     if recurrence.startswith("every:"):
         minutes = max(int(recurrence.split(":", 1)[1]), MIN_INTERVAL_MINUTES)
         nxt = local + timedelta(minutes=minutes)
@@ -99,14 +106,14 @@ def next_due(due: datetime, recurrence: str) -> datetime | None:
     else:
         return None
     # A reminder that fires late (app was down) must not replay every missed slot.
-    now = datetime.now(USER_TZ)
+    now = datetime.now(tz)
     while nxt <= now:
-        nxt = next_due(nxt, recurrence)
+        nxt = next_due(nxt, recurrence, tz)
     return nxt
 
 
-def _fmt(due: datetime) -> str:
-    return due.astimezone(USER_TZ).strftime("%a %d %b %Y, %H:%M")
+def _fmt(due: datetime, tz: ZoneInfo) -> str:
+    return due.astimezone(tz).strftime("%a %d %b %Y, %H:%M")
 
 
 def describe_recurrence(recurrence: str) -> str:
@@ -115,7 +122,7 @@ def describe_recurrence(recurrence: str) -> str:
     return recurrence
 
 
-def _create(user_id: str, text: str, due_at: str, kind: str, recurrence: str, interval_minutes: int | None) -> str:
+def _create(user_id: str, tz: ZoneInfo, text: str, due_at: str, kind: str, recurrence: str, interval_minutes: int | None) -> str:
     if kind not in KINDS or recurrence not in RECURRENCES:
         return f"Invalid kind or recurrence. kind: {KINDS}, recurrence: {RECURRENCES}."
     if recurrence == "interval":
@@ -123,20 +130,20 @@ def _create(user_id: str, text: str, due_at: str, kind: str, recurrence: str, in
             return f"Repeating reminders can't be more frequent than every {MIN_INTERVAL_MINUTES} minutes. Ask the user for a longer interval."
         recurrence = f"every:{int(interval_minutes)}"
     try:
-        due = _parse_due(due_at)
+        due = _parse_due(due_at, tz)
     except ValueError:
         return f"Could not parse due_at '{due_at}'. Use ISO 8601 with an offset, e.g. 2026-09-24T09:00:00+08:00."
-    if due <= datetime.now(USER_TZ):
-        return f"That time ({_fmt(due)}) is in the past. Ask the user for a future time."
+    if due <= datetime.now(tz):
+        return f"That time ({_fmt(due, tz)}) is in the past. Ask the user for a future time."
     try:
         reminder_id = db.create_reminder(user_id, kind, text.strip(), due, recurrence)
     except Exception as e:
         return f"Error saving reminder: {e}"
     repeat = "" if recurrence == "none" else f", repeats {describe_recurrence(recurrence)} until the user says stop"
-    return f"Scheduled {kind} [id: {reminder_id}] for {_fmt(due)}{repeat}: {text.strip()}"
+    return f"Scheduled {kind} [id: {reminder_id}] for {_fmt(due, tz)}{repeat}: {text.strip()}"
 
 
-def _list(user_id: str) -> str:
+def _list(user_id: str, tz: ZoneInfo) -> str:
     try:
         rows = db.list_reminders(user_id)
     except Exception as e:
@@ -146,18 +153,18 @@ def _list(user_id: str) -> str:
     lines = []
     for r in rows:
         repeat = "" if r["recurrence"] == "none" else f" (repeats {describe_recurrence(r['recurrence'])})"
-        lines.append(f"- [id: {r['id']}] {_fmt(r['due_at'])}{repeat} — {r['kind']}: {r['text']}")
+        lines.append(f"- [id: {r['id']}] {_fmt(r['due_at'], tz)}{repeat} — {r['kind']}: {r['text']}")
     return f"{len(rows)} upcoming:\n" + "\n".join(lines)
 
 
-def _cancel(user_id: str, reminder_id: int) -> str:
+def _cancel(user_id: str, tz: ZoneInfo, reminder_id: int) -> str:
     try:
         row = db.cancel_reminder(user_id, reminder_id)
     except Exception as e:
         return f"Error cancelling reminder: {e}"
     if not row:
         return f"No pending reminder with id {reminder_id}."
-    return f"Cancelled reminder {row['id']} ({_fmt(row['due_at'])}): {row['text']}"
+    return f"Cancelled reminder {row['id']} ({_fmt(row['due_at'], tz)}): {row['text']}"
 
 
 def _stop(user_id: str, scope: str) -> str:
@@ -179,19 +186,19 @@ def build_reminder_tools(user_id: str) -> list[SdkMcpTool]:
     )
     async def create_reminder(args: dict) -> dict:
         result = await asyncio.to_thread(
-            _create, user_id, args["text"], args["due_at"], args.get("kind") or "reminder",
+            _create, user_id, tz, args["text"], args["due_at"], args.get("kind") or "reminder",
             args.get("recurrence") or "none", args.get("interval_minutes"),
         )
         return {"content": [{"type": "text", "text": result}]}
 
     @tool("list_reminders", "List the user's upcoming reminders and follow-ups.", LIST_REMINDERS_SCHEMA)
     async def list_reminders(args: dict) -> dict:
-        result = await asyncio.to_thread(_list, user_id)
+        result = await asyncio.to_thread(_list, user_id, tz)
         return {"content": [{"type": "text", "text": result}]}
 
     @tool("cancel_reminder", "Cancel an upcoming reminder by id.", CANCEL_REMINDER_SCHEMA)
     async def cancel_reminder(args: dict) -> dict:
-        result = await asyncio.to_thread(_cancel, user_id, int(args["reminder_id"]))
+        result = await asyncio.to_thread(_cancel, user_id, tz, int(args["reminder_id"]))
         return {"content": [{"type": "text", "text": result}]}
 
     @tool("stop_reminders", "Stop the user's repeating reminders (or all upcoming ones) at once.", STOP_REMINDERS_SCHEMA)
