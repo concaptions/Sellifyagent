@@ -32,7 +32,7 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Personal memory | ✅ `memory_agent` saves facts to `sellify_users.profile`; profile (+ Cue's `pa_users` name/timezone/core_prompt) injected into every turn; per-user timezone drives reminders. Live-verified 2026-09-23 (save without asking, recall, correction, reminder in user's tz) |
 | Cue's earlier documents | ⚠️ `documents_agent` lists/searches `pa_knowledge_chunks` (read-only) via `match_cue_knowledge`, keyed by `pa_users.id`. Live: no-history path verified; **real-user listing/search to be confirmed from the user's phone** (test scripts must not carry real numbers) |
 | Voice notes | ✅ `audio/*` media → Whisper (`OPENAI_TRANSCRIBE_MODEL`, default `whisper-1`) → `[Voice note, transcribed] …` in the message. Live-verified 2026-09-23 (flac sample; transcript recalled next turn) |
-| Photos (vision) | ✅ `image/*` media → PIL downscale ≤1568 px JPEG → base64 image block via SDK streaming input (`_user_turn_with_images`). Live-verified 2026-09-23 (described a public test photo) |
+| Photos (vision) | ✅ `image/*` media → PIL downscale ≤1568 px JPEG → base64 image block via SDK streaming input (`_user_turn_with_images`). Live-verified 2026-09-23 (described a public test photo). Twilio media 404 right after the webhook is retried (gotcha 13) |
 | Image generation + charts | ✅ `images_agent`: `generate_image` (OpenAI `OPENAI_IMAGE_MODEL`, default `gpt-image-1`) and `render_chart` (matplotlib) → `/media/<token>.png` → attached as WhatsApp image. Live-verified 2026-09-23 (BP line chart 47 KB; generated poster 2.2 MB, both served) |
 | Google per user | ⚠️ Each WhatsApp number connects its **own** Google (Calendar + Gmail): tokens in `sellify_users.profile._google_tokens`; personal 30-min link `/oauth/google/start?t=<nonce.exp.sig>` (nonce→phone map in memory, HMAC with `TEST_WEBHOOK_TOKEN`; phone never in the URL); `/start` without a valid token → 403. Owner numbers (`BUSINESS_DATA_PHONES`) fall back to the shared `/data/token.json` (the client's account). Calendar/email tools are per-user closures; `google_connect_link` tool reports status + link. Live-verified 2026-09-23 (stranger → personal link → 307 to accounts.google.com; tampered/bare → 403; owner → shared account). A full consent round-trip by a second real user is still to be done. Google consent screen is in Testing mode: each new user's Gmail must be added as a test user (or publish the app) |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
@@ -197,6 +197,9 @@ subscription login is not allowed for a deployed product). Model is **not pinned
     Sellify replies; if two replies reappear, the n8n workflow was re-activated.
 13. WhatsApp sends a document's filename as the message Body (and Twilio media often has no
     Content-Disposition), so `app.py` uses the Body as the filename when it looks like one.
+    Twilio also fires the webhook before the media has always landed: the first GET can 404
+    (seen live with photos, ~200 ms after the webhook). `download_media` retries 404/5xx from
+    Twilio hosts with pauses 1/2/3/5 s before giving up.
 14. `PersonalAssistant.ainvoke` holds a per-user `asyncio.Lock`: a reminder turn and a user
     turn resuming the same SDK session at once would corrupt it.
 15. Documents are retrieved only when the user asks (tool-based). User explicitly rejected

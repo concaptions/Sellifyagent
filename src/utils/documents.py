@@ -5,6 +5,7 @@ import hashlib
 import io
 import logging
 import re
+import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -16,6 +17,7 @@ from src.config import OPENAI_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
 logger = logging.getLogger(__name__)
 
 MAX_BYTES = 10 * 1024 * 1024
+MEDIA_RETRY_PAUSES = [1, 2, 3, 5]  # seconds; ~11 s total before giving up on Twilio media
 MAX_CHARS = 300_000
 CHUNK_CHARS = 1200
 CHUNK_OVERLAP = 150
@@ -61,13 +63,23 @@ def download_media(url: str) -> tuple[bytes, str | None]:
     # Some hosts refuse the default python-httpx agent outright (403).
     headers = {"User-Agent": "Mozilla/5.0 (compatible; Cue/1.0; +https://sellifyagent-production.up.railway.app)"}
     with httpx.Client(timeout=30.0, follow_redirects=False, headers=headers) as client:
-        resp = client.get(url, auth=auth)
-        hops = 0
-        while resp.is_redirect and hops < 5:
-            nxt = str(resp.next_request.url) if resp.next_request else resp.headers.get("location", "")
-            hop_auth = auth if _is_twilio_host(nxt) else None
-            resp = client.get(nxt, auth=hop_auth)
-            hops += 1
+        # Twilio fires the WhatsApp webhook before the media has always landed
+        # in its store: an immediate GET can 404 and succeed a second later.
+        # Retry with a short backoff rather than telling the user the photo
+        # "failed to load".
+        for attempt, pause in enumerate(MEDIA_RETRY_PAUSES + [0]):
+            resp = client.get(url, auth=auth)
+            hops = 0
+            while resp.is_redirect and hops < 5:
+                nxt = str(resp.next_request.url) if resp.next_request else resp.headers.get("location", "")
+                hop_auth = auth if _is_twilio_host(nxt) else None
+                resp = client.get(nxt, auth=hop_auth)
+                hops += 1
+            if resp.status_code in (404, 500, 502, 503) and auth and pause:
+                logger.info("Media not ready yet (HTTP %s), retrying in %ss", resp.status_code, pause)
+                time.sleep(pause)
+                continue
+            break
         resp.raise_for_status()
         data = resp.content
         if len(data) > MAX_BYTES:
