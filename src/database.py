@@ -485,12 +485,22 @@ def init_business_reader() -> None:
         cur.execute(f"GRANT {READER_ROLE} TO CURRENT_USER")
     # One grant per table, each in its own transaction, so a table that
     # doesn't exist (a dev database) doesn't take the others down with it.
+    # These tables have row-level security on, which silently returns zero
+    # rows to any role that isn't the owner, so the reader also needs an
+    # explicit SELECT policy.
     for table in BUSINESS_TABLES:
         try:
             with get_db() as conn:
-                conn.cursor().execute(f"GRANT SELECT ON {table} TO {READER_ROLE}")
+                cur = conn.cursor()
+                cur.execute(f"GRANT SELECT ON {table} TO {READER_ROLE}")
+                cur.execute(
+                    "SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = %s AND policyname = %s",
+                    (table, f"{READER_ROLE}_select"),
+                )
+                if not cur.fetchone():
+                    cur.execute(f"CREATE POLICY {READER_ROLE}_select ON {table} FOR SELECT TO {READER_ROLE} USING (true)")
         except Exception as e:
-            logger.warning("No read grant on %s: %s", table, e)
+            logger.warning("No read access on %s: %s", table, e)
 
 
 def describe_business_tables() -> dict[str, list[str]]:
@@ -521,7 +531,9 @@ def run_business_query(sql: str, limit: int = 50) -> list[dict]:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(f"SET LOCAL ROLE {READER_ROLE}")
         cur.execute("SET LOCAL statement_timeout = 10000")
-        cur.execute(f"SELECT * FROM ({body}) AS q LIMIT %s", (limit,))
+        # No parameter binding here: the model's SQL legitimately contains
+        # '%' (LIKE patterns), which psycopg2 would read as placeholders.
+        cur.execute(f"SELECT * FROM ({body}) AS q LIMIT {int(limit)}")
         rows = [dict(r) for r in cur.fetchall()]
         conn.rollback()
         return rows
