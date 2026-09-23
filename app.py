@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -73,7 +74,9 @@ async def whatsapp_webhook(request: Request):
     return Response(content="", media_type="text/xml")
 
 
-def _ingest_attachment(phone: str, url: str, content_type: str, message_sid: str | None) -> str:
+def _ingest_attachment(
+    phone: str, url: str, content_type: str, message_sid: str | None, caption_filename: str | None = None
+) -> str:
     """Download and store one attachment; return the system line the agent
     sees, stating plainly what happened so it can't claim otherwise."""
     try:
@@ -82,7 +85,7 @@ def _ingest_attachment(phone: str, url: str, content_type: str, message_sid: str
                 "I can't read that file type yet. I can read PDF, Word (.docx) and plain-text files."
             )
         data, filename = documents.download_media(url)
-        filename = filename or documents.default_filename(content_type, message_sid)
+        filename = filename or caption_filename or documents.default_filename(content_type, message_sid)
         result = documents.ingest(phone, data, content_type, filename)
     except documents.DocumentError as e:
         return f"[Document: the user attached a file ({content_type}) that was NOT saved. Reason: {e}]"
@@ -100,6 +103,10 @@ def _ingest_attachment(phone: str, url: str, content_type: str, message_sid: str
     )
 
 
+def _looks_like_filename(text: str) -> bool:
+    return bool(re.fullmatch(r"[^\n/\\]{1,200}\.(pdf|docx|txt|csv)", text.strip(), re.IGNORECASE))
+
+
 async def _process_message(
     phone: str,
     message: str,
@@ -108,8 +115,12 @@ async def _process_message(
     message_sid: str | None = None,
 ):
     if media:
+        # WhatsApp sends a document's filename as the message body, and
+        # Twilio's media download often has no filename header, so the body
+        # is the only place the real name shows up.
+        caption_filename = message if len(media) == 1 and _looks_like_filename(message) else None
         notes = [
-            await asyncio.to_thread(_ingest_attachment, phone, url, ctype, message_sid)
+            await asyncio.to_thread(_ingest_attachment, phone, url, ctype, message_sid, caption_filename)
             for url, ctype in media
         ]
         message = "\n".join(notes) + ("\n\n" + message if message else "")
