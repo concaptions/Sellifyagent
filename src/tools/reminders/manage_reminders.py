@@ -176,8 +176,10 @@ def _stop(user_id: str, scope: str) -> str:
     return f"Stopped {n} {what}." if n else f"No {what} to stop."
 
 
-def build_reminder_tools(user_id: str) -> list[SdkMcpTool]:
-    """Per-user tools via closure, same reason as build_notes_tools."""
+def build_reminder_tools(user_id: str, timezone: str | None = None) -> list[SdkMcpTool]:
+    """Per-user tools via closure, same reason as build_notes_tools. The
+    timezone is the user's own (from their profile), so "9am" is their 9am."""
+    tz = user_tz(timezone)
 
     @tool(
         "create_reminder",
