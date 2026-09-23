@@ -10,7 +10,8 @@ from claude_agent_sdk import tool, SdkMcpTool
 from src import database as db
 
 USER_TZ = ZoneInfo("Asia/Singapore")
-RECURRENCES = ("none", "daily", "weekly", "monthly")
+RECURRENCES = ("none", "interval", "daily", "weekly", "monthly")
+MIN_INTERVAL_MINUTES = 10
 KINDS = ("reminder", "followup")
 
 CREATE_REMINDER_SCHEMA = {
@@ -36,10 +37,26 @@ CREATE_REMINDER_SCHEMA = {
         "recurrence": {
             "type": "string",
             "enum": list(RECURRENCES),
-            "description": "Repeat schedule. Default 'none'.",
+            "description": "Repeat schedule. Default 'none'. 'interval' repeats every interval_minutes until the user stops it.",
+        },
+        "interval_minutes": {
+            "type": "integer",
+            "description": "With recurrence 'interval': minutes between repeats, minimum 10.",
         },
     },
     "required": ["text", "due_at"],
+}
+
+STOP_REMINDERS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scope": {
+            "type": "string",
+            "enum": ["repeating", "all"],
+            "description": "'repeating' stops only repeating reminders (default); 'all' cancels every upcoming reminder.",
+        }
+    },
+    "required": [],
 }
 
 LIST_REMINDERS_SCHEMA = {"type": "object", "properties": {}, "required": []}
@@ -62,11 +79,16 @@ def _parse_due(value: str) -> datetime:
 
 def next_due(due: datetime, recurrence: str) -> datetime | None:
     """Next occurrence after `due`, stepping in the user's timezone so a
-    9:00 reminder stays at 9:00 local. Returns None for one-off reminders."""
+    9:00 reminder stays at 9:00 local. Returns None for one-off reminders.
+    `every:N` repeats every N minutes (N >= 10, clamped here as well as at
+    creation so a repeating reminder can never turn into a flood)."""
     if recurrence == "none":
         return None
     local = due.astimezone(USER_TZ)
-    if recurrence == "daily":
+    if recurrence.startswith("every:"):
+        minutes = max(int(recurrence.split(":", 1)[1]), MIN_INTERVAL_MINUTES)
+        nxt = local + timedelta(minutes=minutes)
+    elif recurrence == "daily":
         nxt = local + timedelta(days=1)
     elif recurrence == "weekly":
         nxt = local + timedelta(weeks=1)
@@ -87,9 +109,19 @@ def _fmt(due: datetime) -> str:
     return due.astimezone(USER_TZ).strftime("%a %d %b %Y, %H:%M")
 
 
-def _create(user_id: str, text: str, due_at: str, kind: str, recurrence: str) -> str:
+def describe_recurrence(recurrence: str) -> str:
+    if recurrence.startswith("every:"):
+        return f"every {recurrence.split(':', 1)[1]} minutes"
+    return recurrence
+
+
+def _create(user_id: str, text: str, due_at: str, kind: str, recurrence: str, interval_minutes: int | None) -> str:
     if kind not in KINDS or recurrence not in RECURRENCES:
         return f"Invalid kind or recurrence. kind: {KINDS}, recurrence: {RECURRENCES}."
+    if recurrence == "interval":
+        if not interval_minutes or interval_minutes < MIN_INTERVAL_MINUTES:
+            return f"Repeating reminders can't be more frequent than every {MIN_INTERVAL_MINUTES} minutes. Ask the user for a longer interval."
+        recurrence = f"every:{int(interval_minutes)}"
     try:
         due = _parse_due(due_at)
     except ValueError:
@@ -100,7 +132,7 @@ def _create(user_id: str, text: str, due_at: str, kind: str, recurrence: str) ->
         reminder_id = db.create_reminder(user_id, kind, text.strip(), due, recurrence)
     except Exception as e:
         return f"Error saving reminder: {e}"
-    repeat = "" if recurrence == "none" else f", repeats {recurrence}"
+    repeat = "" if recurrence == "none" else f", repeats {describe_recurrence(recurrence)} until the user says stop"
     return f"Scheduled {kind} [id: {reminder_id}] for {_fmt(due)}{repeat}: {text.strip()}"
 
 
@@ -113,7 +145,7 @@ def _list(user_id: str) -> str:
         return "No upcoming reminders."
     lines = []
     for r in rows:
-        repeat = "" if r["recurrence"] == "none" else f" (repeats {r['recurrence']})"
+        repeat = "" if r["recurrence"] == "none" else f" (repeats {describe_recurrence(r['recurrence'])})"
         lines.append(f"- [id: {r['id']}] {_fmt(r['due_at'])}{repeat} — {r['kind']}: {r['text']}")
     return f"{len(rows)} upcoming:\n" + "\n".join(lines)
 
@@ -128,6 +160,15 @@ def _cancel(user_id: str, reminder_id: int) -> str:
     return f"Cancelled reminder {row['id']} ({_fmt(row['due_at'])}): {row['text']}"
 
 
+def _stop(user_id: str, scope: str) -> str:
+    try:
+        n = db.stop_reminders(user_id, repeating_only=(scope != "all"))
+    except Exception as e:
+        return f"Error stopping reminders: {e}"
+    what = "repeating reminders" if scope != "all" else "upcoming reminders"
+    return f"Stopped {n} {what}." if n else f"No {what} to stop."
+
+
 def build_reminder_tools(user_id: str) -> list[SdkMcpTool]:
     """Per-user tools via closure, same reason as build_notes_tools."""
 
@@ -138,7 +179,8 @@ def build_reminder_tools(user_id: str) -> list[SdkMcpTool]:
     )
     async def create_reminder(args: dict) -> dict:
         result = await asyncio.to_thread(
-            _create, user_id, args["text"], args["due_at"], args.get("kind") or "reminder", args.get("recurrence") or "none"
+            _create, user_id, args["text"], args["due_at"], args.get("kind") or "reminder",
+            args.get("recurrence") or "none", args.get("interval_minutes"),
         )
         return {"content": [{"type": "text", "text": result}]}
 
@@ -152,11 +194,17 @@ def build_reminder_tools(user_id: str) -> list[SdkMcpTool]:
         result = await asyncio.to_thread(_cancel, user_id, int(args["reminder_id"]))
         return {"content": [{"type": "text", "text": result}]}
 
-    return [create_reminder, list_reminders, cancel_reminder]
+    @tool("stop_reminders", "Stop the user's repeating reminders (or all upcoming ones) at once.", STOP_REMINDERS_SCHEMA)
+    async def stop_reminders(args: dict) -> dict:
+        result = await asyncio.to_thread(_stop, user_id, args.get("scope") or "repeating")
+        return {"content": [{"type": "text", "text": result}]}
+
+    return [create_reminder, list_reminders, cancel_reminder, stop_reminders]
 
 
 REMINDER_TOOL_NAMES = [
     "mcp__reminders__create_reminder",
     "mcp__reminders__list_reminders",
     "mcp__reminders__cancel_reminder",
+    "mcp__reminders__stop_reminders",
 ]

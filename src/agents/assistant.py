@@ -18,11 +18,13 @@ from src.prompts.notes_agent import NOTES_AGENT_PROMPT
 from src.prompts.research_agent import RESEARCH_AGENT_PROMPT
 from src.prompts.documents_agent import DOCUMENTS_AGENT_PROMPT
 from src.prompts.reminders_agent import REMINDERS_AGENT_PROMPT
+from src.prompts.browser_agent import BROWSER_AGENT_PROMPT
 from src.tools.calendar import calendar_tools, CALENDAR_TOOL_NAMES
 from src.tools.email import email_tools, EMAIL_TOOL_NAMES
 from src.tools.notes import build_notes_tools, NOTES_TOOL_NAMES
 from src.tools.documents import build_document_tools, DOCUMENT_TOOL_NAMES
 from src.tools.reminders import build_reminder_tools, REMINDER_TOOL_NAMES
+from src.tools.browser import build_browser_tools, BROWSER_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +40,12 @@ RESEARCH_TOOL_NAMES = ["WebSearch", "WebFetch"]
 
 ALL_TOOL_NAMES = (
     CALENDAR_TOOL_NAMES + EMAIL_TOOL_NAMES + NOTES_TOOL_NAMES + RESEARCH_TOOL_NAMES + DOCUMENT_TOOL_NAMES
-    + REMINDER_TOOL_NAMES
+    + REMINDER_TOOL_NAMES + BROWSER_TOOL_NAMES
 )
 
 
 class PersonalAssistant:
-    """Wires a Claude Agent SDK manager agent with six specialist subagents.
+    """Wires a Claude Agent SDK manager agent with seven specialist subagents.
 
     Authenticates with the ANTHROPIC_API_KEY in the environment (metered API
     usage); a deployed product may not run on a claude.ai subscription login.
@@ -80,6 +82,7 @@ class PersonalAssistant:
         notes_tools = build_notes_tools(user_phone)
         document_tools = build_document_tools(user_phone)
         reminder_tools = build_reminder_tools(user_phone)
+        browser_tools = build_browser_tools(user_phone)
 
         mcp_servers = {
             "calendar": create_sdk_mcp_server("calendar", tools=calendar_tools),
@@ -87,6 +90,7 @@ class PersonalAssistant:
             "notes": create_sdk_mcp_server("notes", tools=notes_tools),
             "documents": create_sdk_mcp_server("documents", tools=document_tools),
             "reminders": create_sdk_mcp_server("reminders", tools=reminder_tools),
+            "browser": create_sdk_mcp_server("browser", tools=browser_tools),
         }
 
         agents = {
@@ -119,6 +123,11 @@ class PersonalAssistant:
                 description="Schedules, lists and cancels reminders and timed follow-ups for the user.",
                 prompt=REMINDERS_AGENT_PROMPT.format(**format_kwargs),
                 tools=REMINDER_TOOL_NAMES,
+            ),
+            "browser_agent": AgentDefinition(
+                description="Makes guest bookings on public websites with a headless browser: restaurants, appointments, slots. No logins or payments.",
+                prompt=BROWSER_AGENT_PROMPT.format(**format_kwargs),
+                tools=BROWSER_TOOL_NAMES,
             ),
         }
 

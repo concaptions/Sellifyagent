@@ -395,6 +395,20 @@ def cancel_reminder(user_id: str, reminder_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def stop_reminders(user_id: str, repeating_only: bool = True) -> int:
+    """Cancel a user's pending reminders. Also called from app.py when the
+    user replies "stop", so stopping never depends on the model."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """UPDATE sellify_reminders SET status = 'cancelled', updated_at = NOW()
+               WHERE user_id = %s AND status IN ('pending', 'sending')
+               AND (NOT %s OR recurrence <> 'none')""",
+            (user_id, repeating_only),
+        )
+        return cur.rowcount
+
+
 def claim_due_reminders(limit: int = 20) -> list[dict]:
     """Atomically move due reminders from pending to sending and return them.
 

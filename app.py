@@ -16,7 +16,8 @@ from src import database as db
 from src.database import init_database, upsert_user, save_chat_message
 from src.tools.reminders import next_due
 from src.tools.reminders.manage_reminders import USER_TZ
-from src.utils import documents
+from src.utils import documents, media_store
+from src.utils.approvals import booking_gate
 from src.utils.google_auth import (
     get_authorization_url,
     exchange_code_for_token,
@@ -30,6 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 REMINDER_POLL_SECONDS = 60
+_STOP_WORDS = re.compile(r"^\s*(stop|stop (the |my )?reminders?|stop reminding me)\s*[.!]*\s*$", re.IGNORECASE)
 
 os.makedirs("db", exist_ok=True)
 assistant = PersonalAssistant()
@@ -142,6 +144,21 @@ async def _process_message(
         ]
         message = "\n".join(notes) + ("\n\n" + message if message else "")
 
+    # Two things the user can say that must take effect whether or not the
+    # model cooperates: approving/declining a pending booking, and "stop" for
+    # repeating reminders. Both are settled here and reported to the agent as
+    # a [SYSTEM: ...] line.
+    system_line = booking_gate.resolve_from_message(phone, message)
+    if not system_line and _STOP_WORDS.match(message):
+        try:
+            stopped = await asyncio.to_thread(db.stop_reminders, phone, True)
+        except Exception:
+            stopped = 0
+        if stopped:
+            system_line = f"[SYSTEM: the user replied stop; {stopped} repeating reminder(s) were cancelled. Confirm in one line.]"
+    if system_line:
+        message = f"{system_line}\n\n{message}"
+
     try:
         await asyncio.to_thread(upsert_user, phone)
     except Exception:
@@ -164,10 +181,25 @@ async def _process_message(
         logger.debug("Chat save skipped (no DB)")
 
     try:
-        await asyncio.to_thread(whatsapp.send_message, whatsapp_from, response)
+        await asyncio.to_thread(whatsapp.send_message, whatsapp_from, response, _own_media_urls(response))
         logger.info("Reply sent to %s: %s", phone, response[:100])
     except Exception as e:
         logger.error("Failed to send reply to %s: %s", phone, e)
+
+
+def _own_media_urls(text: str) -> list[str]:
+    """Screenshots the browser tools produced, so they go out as images."""
+    if not PUBLIC_BASE_URL:
+        return []
+    return re.findall(re.escape(PUBLIC_BASE_URL) + r"/media/[0-9a-f]{32}\.png", text)
+
+
+@app.get("/media/{token}.png")
+async def media(token: str):
+    png = media_store.get(token)
+    if not png:
+        raise HTTPException(status_code=404)
+    return Response(content=png, media_type="image/png")
 
 
 async def _reminder_loop():
@@ -207,6 +239,9 @@ async def _deliver_reminder(reminder: dict):
                 raise RuntimeError("agent turn failed")
             # A plain reminder must still reach the user even if the model is down.
             reply = f"Reminder: {reminder['text']}"
+        if reminder["recurrence"] != "none":
+            # The way out is always in the message itself, not left to the model.
+            reply += "\n\nReply *stop* to end these reminders."
         await asyncio.to_thread(whatsapp.send_message, f"whatsapp:{phone}", reply)
     except Exception as e:
         logger.error("Reminder %s delivery failed: %s", reminder["id"], e)

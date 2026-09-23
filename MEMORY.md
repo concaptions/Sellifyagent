@@ -23,15 +23,15 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Document upload (PDF/DOCX/text) | ✅ Live-verified 2026-09-23 from a real phone (4 MB PDF → 252 chunks embedded, ~1 min) and via signed replay (Q&A + delete). Stores extracted text only |
 | Webhook security | ✅ Real Twilio signatures pass (real phone); forged → 403; unsigned `/webhook/test` → 404 |
 | Web search | ✅ Claude Code built-in `WebSearch`/`WebFetch` (no Tavily key); live-verified 2026-09-23 (same-day headline with source URL; page fetch) |
-| Reminders + proactive follow-ups | ✅ `sellify_reminders` + `reminders_agent` + 60 s scheduler; live-verified 2026-09-23 via `/webhook/test` (create/list/cancel, fired on time, outcome recorded from the Twilio result). **Not yet fired to a real phone** |
-| Browser automation | 🚧 Not started (see Backlog) |
+| Reminders + proactive follow-ups | ✅ `sellify_reminders` + `reminders_agent` + 60 s scheduler; live-verified 2026-09-23 via `/webhook/test`. Repeating reminders: min every 10 min, created only after the user OKs the schedule, every message carries "Reply *stop*", and "stop" is handled in `app.py` code. **Not yet fired to a real phone** |
+| Booking worker (browser) | ⚠️ Built: `browser_agent` + Playwright (Dockerfile on Playwright image). Guest bookings only; login/password/card fields blocked in code; final click locked until the user's own "yes" (`src/utils/approvals.py`); screenshot proof via `/media/<token>.png`. **Live test pending** |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
 
 ## Request flow
 ```
 WhatsApp → Twilio → POST /whatsapp/webhook (FastAPI, returns empty TwiML at once)
   → asyncio.create_task → PersonalAssistant.ainvoke(msg, user_phone)
-  → claude_agent_sdk.query(): manager prompt + 4 AgentDefinitions
+  → claude_agent_sdk.query(): manager prompt + 7 AgentDefinitions
   → tools run in-process via create_sdk_mcp_server
   → reply → WhatsAppChannel (Twilio REST, split at 1600 chars)
 ```
@@ -47,20 +47,32 @@ the raw text if the agent errors) and `followup` (agent does work first, e.g. ch
 Business-initiated WhatsApp messages >24 h after the user's last message need a Twilio
 content template or Twilio rejects them (error 63016) — same limit Cue has.
 
+Bookings: `browser_agent` → `src/tools/browser/booking.py` (open/read/click/type/select/
+screenshot + `request_booking_approval`) over `src/utils/browser.py` (one Chromium, one context
+per user, 15 min idle close, nothing persisted). Commit-looking buttons (book/confirm/reserve/
+submit/pay…) are refused until `booking_gate.is_approved(user)`; the only thing that sets that is
+`app.py` matching the user's *own* next message against a yes/no regex (`resolve_from_message`),
+one commit per approval, 10 min TTL. Password/card-like fields and login pages/buttons are refused
+outright. After a commit the tool screenshots the page → `media_store` → `/media/<token>.png`;
+`app.py` attaches our own media URLs found in the reply as WhatsApp images.
+
 ## File map
 - `app.py` — FastAPI routes: `/whatsapp/webhook`, `/webhook/test`, `/health`,
   `/oauth/google/start`, `/oauth/google/callback`, `/oauth/google/status`
 - `src/agents/assistant.py` — builds `ClaudeAgentOptions`, per-user session ids
 - `src/prompts/*.py` — manager + 4 subagent prompts (small, principle-based)
-- `src/tools/{calendar,email,notes,documents,reminders}/` — SDK `@tool` functions. Web research
+- `src/tools/{calendar,email,notes,documents,reminders,browser}/` — SDK `@tool` functions. Web research
   has no tool module: `research_agent` uses the CLI's built-in `WebSearch`/`WebFetch`
   (`RESEARCH_TOOL_NAMES` in `assistant.py`)
 - `src/utils/documents.py` — media download (Twilio auth only to *.twilio.com), extract, chunk, embed, ingest
 - `src/utils/google_auth.py` — web OAuth flow, PKCE verifier store, token refresh
+- `src/utils/browser.py`, `src/utils/approvals.py`, `src/utils/media_store.py` — booking worker
+- `Dockerfile` (Playwright python image; Railway builds from it, Procfile unused) + `.dockerignore`
+  (excludes `.env`, `token.json`, `credentials.json`)
 - `src/database.py` — Sellify's own tables `sellify_users`, `sellify_notes`, `sellify_chat_history`,
   `sellify_reminders`, `sellify_documents`, `sellify_document_chunks` (pgvector 1536)
 - `src/channels/whatsapp.py`, `src/utils/message_splitter.py`
-- `Procfile` — `uvicorn app:app --host 0.0.0.0 --port $PORT`
+- `Procfile` — legacy (Railpack); the Dockerfile CMD is what runs now
 
 ## Infrastructure (IDs are not secrets)
 **Railway** — workspace Buildberg, project `tender-energy`
@@ -144,6 +156,9 @@ subscription login is not allowed for a deployed product). Model is **not pinned
     turn resuming the same SDK session at once would corrupt it.
 15. Documents are retrieved only when the user asks (tool-based). User explicitly rejected
     auto-retrieval on every message.
+16. Playwright's sync API can't be used from the asyncio loop; the browser tools use the async
+    API in-process (SDK tools run in the app's loop). Chromium as root needs `--no-sandbox`. In
+    this sandbox set `PLAYWRIGHT_CHROMIUM_PATH=/opt/pw-browsers/chromium` to test locally.
 
 ## Backlog (priority order)
 1. Confirm live: Gmail API send; a reminder actually arriving on a real phone (ask the user to text "remind me in 2 minutes to …").
@@ -151,11 +166,10 @@ subscription login is not allowed for a deployed product). Model is **not pinned
    reminders via it (else they fail with 63016). Persist `_sessions` so proactive turns keep
    context across restarts.
 3. Pin the model: `ClaudeAgentOptions(model="claude-sonnet-5")` — recommended, awaiting user OK.
-4. Browser automation. Phase A (read-only browsing) is effectively covered by `WebFetch`.
-   Phase B (bookings: logged-in actions, forms, payments) **needs explicit user decisions on
-   credential storage, allowed sites, and a confirm-before-act gate — do not build on
-   assumptions.** Design: separate Playwright worker service, per-user encrypted credentials,
-   agent proposes → user confirms on WhatsApp → worker acts → screenshot proof.
+4. Booking worker follow-ups: live-verify on real booking sites; sites with captchas/JS-heavy
+   widgets may need per-site handling; browser sessions and approvals are in-memory (lost on
+   redeploy). Logged-in / payment bookings **still need explicit user decisions on credential
+   storage, allowed sites — do not build on assumptions.**
 5. Document upload follow-ups: scanned PDFs via OCR/vision; per-tier storage caps; staleness
    nudges; when Canon promotion is built, Canon facts must store a source-document id so
    deleting a doc flags them; keep original files only if needed (private Supabase Storage).
@@ -180,6 +194,9 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 - 2026-09-23 Web search via Claude's built-in WebSearch/WebFetch, not Tavily (one API bill, no
   extra key). Reminders live in `sellify_reminders` (not `pa_reminders`: Cue's scheduler would
   double-fire). Document retrieval stays on-demand only (user decision).
+- 2026-09-23 Booking worker (user-approved): guest bookings only, in the app process (Dockerfile
+  on the Playwright image) rather than a separate service; approval and no-login/no-payment rules
+  enforced in code, not prompts. Repeating reminders: ≥10 min, user-confirmed, "stop" in code.
 
 ## Maintaining this file
 At the end of any session that changes code, infra, credentials setup, or plans: update

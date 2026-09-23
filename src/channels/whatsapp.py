@@ -13,15 +13,15 @@ class WhatsAppChannel:
         self.client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         self.from_number = FROM_WHATSAPP_NUMBER
 
-    def send_message(self, to_number: str, body: str):
+    def send_message(self, to_number: str, body: str, media_urls: list[str] | None = None):
         parts = split_message(body)
-        for part in parts:
+        for i, part in enumerate(parts):
             try:
-                self.client.messages.create(
-                    from_=self.from_number,
-                    to=to_number,
-                    body=part,
-                )
+                kwargs = {"from_": self.from_number, "to": to_number, "body": part}
+                if media_urls and i == 0:
+                    # WhatsApp takes one media item per message.
+                    kwargs["media_url"] = media_urls[:1]
+                self.client.messages.create(**kwargs)
             except Exception as e:
                 logger.error("Failed to send WhatsApp message to %s: %s", to_number, e)
                 raise
