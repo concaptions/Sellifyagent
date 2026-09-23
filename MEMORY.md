@@ -22,8 +22,8 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Notes | ✅ Per-user isolated; on Cue's Supabase (`sellify_notes`), live-verified 2026-09-23 |
 | Document upload (PDF/DOCX/text) | ✅ Live-verified 2026-09-23 from a real phone (4 MB PDF → 252 chunks embedded, ~1 min) and via signed replay (Q&A + delete). Stores extracted text only |
 | Webhook security | ✅ Real Twilio signatures pass (real phone); forged → 403; unsigned `/webhook/test` → 404 |
-| Web search | ⚠️ Rewired to Claude Code built-in `WebSearch`/`WebFetch` (no Tavily); deployed, **live result not yet confirmed** |
-| Reminders + proactive follow-ups | ⚠️ Built (`sellify_reminders`, `reminders_agent`, 60 s scheduler in `app.py`); deployed, **live fire not yet confirmed** |
+| Web search | ✅ Claude Code built-in `WebSearch`/`WebFetch` (no Tavily key); live-verified 2026-09-23 (same-day headline with source URL; page fetch) |
+| Reminders + proactive follow-ups | ✅ `sellify_reminders` + `reminders_agent` + 60 s scheduler; live-verified 2026-09-23 via `/webhook/test` (create/list/cancel, fired on time, outcome recorded from the Twilio result). **Not yet fired to a real phone** |
 | Browser automation | 🚧 Not started (see Backlog) |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
 
@@ -132,7 +132,9 @@ subscription login is not allowed for a deployed product). Model is **not pinned
     read its deploy logs. Railway log timestamps lag; use the script's own start time as the window.
     `/webhook/test` needs header `X-Test-Token: Bun.env.TEST_WEBHOOK_TOKEN`. To replay a WhatsApp
     message, sign it like Twilio: base64(HMAC-SHA1(authToken, url + sorted key+value pairs)) in
-    `X-Twilio-Signature`, url = `PUBLIC_BASE_URL + "/whatsapp/webhook"`.
+    `X-Twilio-Signature`, url = `PUBLIC_BASE_URL + "/whatsapp/webhook"`. The Railway MCP
+    `get-logs`/`list-deployments` tools sometimes fail with "does not match output schema";
+    the `railway-agent` tool can still return the same logs verbatim (ask for raw lines).
 11. Railway `list-deployments` status can stay `BUILDING` after a deploy is actually live — recheck.
 12. Two replies per message is expected (parallel run with Cue), not a bug. For documents, Cue replies
     "Got your file (N chars). Added to your canon"; Sellify replies separately.
@@ -144,7 +146,7 @@ subscription login is not allowed for a deployed product). Model is **not pinned
     auto-retrieval on every message.
 
 ## Backlog (priority order)
-1. Confirm live: Gmail API send, WebSearch reply, a reminder firing to a real phone.
+1. Confirm live: Gmail API send; a reminder actually arriving on a real phone (ask the user to text "remind me in 2 minutes to …").
 2. Reminders outside Twilio's 24 h window: register a WhatsApp content template and send
    reminders via it (else they fail with 63016). Persist `_sessions` so proactive turns keep
    context across restarts.
