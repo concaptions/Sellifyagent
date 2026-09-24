@@ -18,7 +18,10 @@ def _decode(part: dict) -> str:
 
 
 def _html_to_text(markup: str) -> str:
-    markup = re.sub(r"(?is)<(script|style).*?</\1>", "", markup)
+    # Comments first: marketing mail is full of Outlook conditionals
+    # (<!--[if mso]> … <![endif]-->) that otherwise leak into the text.
+    markup = re.sub(r"(?s)<!--.*?-->", "", markup)
+    markup = re.sub(r"(?is)<(script|style|head).*?</\1>", "", markup)
     markup = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>|</li>|</h\d>", "\n", markup)
     text = re.sub(r"<[^>]+>", "", markup)
     text = html.unescape(text)
