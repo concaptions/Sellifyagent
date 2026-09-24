@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+credentials.json
+token.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
+config.json
