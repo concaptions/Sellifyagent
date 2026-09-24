@@ -251,6 +251,16 @@ class PersonalAssistant:
                             if msg.result:
                                 result_text = msg.result
                             self._sessions[user_phone] = msg.session_id
+                            # One line per turn so spend per message and the
+                            # model actually used can be read off the logs.
+                            u = msg.usage or {}
+                            logger.info(
+                                "Turn cost: $%.4f, %d API round(s), in=%s cache_read=%s cache_write=%s out=%s, models=%s",
+                                msg.total_cost_usd or 0.0, msg.num_turns or 0,
+                                u.get("input_tokens"), u.get("cache_read_input_tokens"),
+                                u.get("cache_creation_input_tokens"), u.get("output_tokens"),
+                                ",".join((msg.model_usage or {}).keys()) or "?",
+                            )
                     break
                 except Exception as e:
                     # A stored session id whose transcript is gone (volume
