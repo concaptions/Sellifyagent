@@ -21,6 +21,11 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 # still stored and searched by keyword.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
+# The Claude model every turn (manager + subagents) runs on. Pinned to Sonnet
+# 5 for cost (~2.5x cheaper than the SDK's Opus default); override on Railway
+# to compare quality without a deploy.
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
+
 # Shared secret for POST /webhook/test. That endpoint runs the agent as any
 # phone number it's given and returns the reply, so leaving it open would let
 # anyone read any user's notes and documents. Unset = endpoint disabled.

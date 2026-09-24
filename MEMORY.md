@@ -169,7 +169,9 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
 - Cue's reference docs (schema, workflows, prompt): Cue handover bundle, not in the repo.
 
 **LLM** — Claude Agent SDK 0.2.157, metered `ANTHROPIC_API_KEY` (a claude.ai
-subscription login is not allowed for a deployed product). Model is **not pinned** (SDK default).
+subscription login is not allowed for a deployed product). Model **pinned to `claude-sonnet-5`**
+(`CLAUDE_MODEL` env var, default in `src/config.py`; passed as `ClaudeAgentOptions(model=…)`, subagents
+inherit) since 2026-09-24 for cost. Every turn logs `Turn cost: $…, models=…` (`ResultMessage.total_cost_usd`).
 
 ## Hard-won gotchas (read before changing agent/tool code)
 1. `AgentDefinition.tools` restricts but does not grant: top-level `allowed_tools` must contain
@@ -239,7 +241,10 @@ subscription login is not allowed for a deployed product). Model is **not pinned
 2. Cue prompt parity: port the voice/rules from the handover `system-prompt.md`, personas,
    core_prompt from `pa_users.profile`. Reminders outside Twilio's 24 h window: register a WhatsApp content template and send
    reminders via it (else they fail with 63016).
-3. Pin the model: `ClaudeAgentOptions(model="claude-sonnet-5")` — recommended, awaiting user OK.
+3. Pre-test hardening for ~20 testers (user asked for the plan 2026-09-24): tester allowlist,
+   first-message welcome flow, per-user daily cost to the DB, "disconnect Google" tool, spend alert
+   in the Anthropic console. User side: add each tester's Gmail as a Google test user, register a
+   WhatsApp template for >24 h reminders. Capacity is fine (24 GB / 24 vCPU limit, 1.1 GB peak).
 4. Booking worker follow-ups: live-verify on real booking sites; sites with captchas/JS-heavy
    widgets may need per-site handling; browser sessions and approvals are in-memory (lost on
    redeploy). Logged-in / payment bookings **still need explicit user decisions on credential
@@ -288,6 +293,8 @@ subscription login is not allowed for a deployed product). Model is **not pinned
   Then, on the user's instruction, Contacts (read), Tasks, Docs/Sheets (write), Gmail modify and
   Drive save (drive.file, never full drive) — one consent for everything Cue supports; writes are
   append/create only, deletion is Gmail Trash only.
+- 2026-09-24 Model pinned to Sonnet 5 (user decision, cost): ~$0.02–0.06 per one-task message vs
+  $0.05–0.15 on Opus; `CLAUDE_MODEL` env var allows an A/B without a deploy. Per-turn cost logged.
 - 2026-09-23 Booking worker (user-approved): guest bookings only, in the app process (Dockerfile
   on the Playwright image) rather than a separate service; approval and no-login/no-payment rules
   enforced in code, not prompts. Repeating reminders: ≥10 min, user-confirmed, "stop" in code.

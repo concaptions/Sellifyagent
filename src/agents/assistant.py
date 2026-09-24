@@ -30,7 +30,7 @@ from src.tools.drive import build_drive_tools, DRIVE_TOOL_NAMES
 from src.tools.workspace import build_workspace_tools, WORKSPACE_TOOL_NAMES
 from src.tools.tasks import build_tasks_tools, TASKS_TOOL_NAMES
 from src.tools.contacts import build_contacts_tools, CONTACTS_TOOL_NAMES
-from src.config import BUSINESS_DATA_PHONES
+from src.config import BUSINESS_DATA_PHONES, CLAUDE_MODEL
 from src.tools.calendar import build_calendar_tools, CALENDAR_TOOL_NAMES
 from src.tools.email import build_email_tools, EMAIL_TOOL_NAMES
 from src.tools.notes import build_notes_tools, NOTES_TOOL_NAMES
@@ -214,6 +214,7 @@ class PersonalAssistant:
         }
 
         return ClaudeAgentOptions(
+            model=CLAUDE_MODEL,  # subagents inherit it
             system_prompt=MANAGER_PROMPT.format(**format_kwargs),
             mcp_servers=mcp_servers,
             allowed_tools=ALL_TOOL_NAMES,
