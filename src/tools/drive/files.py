@@ -2,7 +2,7 @@
 ever carries drive.readonly, so nothing here can change, share or delete a
 file; file bytes are read for the duration of one call and not stored."""
 from src.utils.documents import DocumentError, MAX_BYTES, SUPPORTED_TYPES, extract_text
-from src.utils.google_auth import drive_not_connected, get_drive_service
+from src.utils.google_auth import drive_not_connected, get_drive_service, get_drive_write_service, scope_not_granted
 
 MAX_TEXT_CHARS = 12_000
 _FIELDS = "files(id,name,mimeType,modifiedTime,size,webViewLink,owners(emailAddress))"
@@ -81,6 +81,75 @@ def read_file(phone: str, file_id: str) -> str:
         out += f"\n\n[Text truncated at {MAX_TEXT_CHARS:,} characters]"
     return out
 
+
+def _find_folder(phone: str, name: str) -> str | None:
+    """Folder id by name, via the read scope (drive.file alone only sees
+    files Cue created)."""
+    service = get_drive_service(phone)
+    if not service:
+        return None
+    resp = service.files().list(
+        q=f"mimeType = 'application/vnd.google-apps.folder' and name = '{_q(name)}' and trashed = false",
+        pageSize=1, fields="files(id)", corpora="allDrives", includeItemsFromAllDrives=True, supportsAllDrives=True,
+    ).execute()
+    files = resp.get("files", [])
+    return files[0]["id"] if files else None
+
+
+def upload_to_drive(phone: str, name: str, mime: str, data: bytes, folder_name: str | None) -> str:
+    """Create one file in the user's Drive (drive.file: Cue can only ever
+    touch files it created this way). Falls back to My Drive's root if the
+    requested folder can't be used."""
+    from googleapiclient.http import MediaInMemoryUpload
+
+    service = get_drive_write_service(phone)
+    if not service:
+        return scope_not_granted(phone, "Saving to Google Drive")
+    if len(data) > MAX_BYTES:
+        return f"That file is too large to save ({len(data) // 1_000_000} MB; the limit is 10 MB)."
+    body: dict = {"name": name}
+    placed = ""
+    try:
+        if folder_name:
+            folder_id = _find_folder(phone, folder_name)
+            if folder_id:
+                body["parents"] = [folder_id]
+                placed = f" in folder '{folder_name}'"
+            else:
+                placed = f" (no folder called '{folder_name}' was found, so it went to My Drive)"
+        media = MediaInMemoryUpload(data, mimetype=mime or "application/octet-stream", resumable=False)
+        try:
+            f = service.files().create(body=body, media_body=media, fields="id,name,webViewLink", supportsAllDrives=True).execute()
+        except Exception:
+            if "parents" not in body:
+                raise
+            # A folder Cue didn't create may refuse new children under drive.file.
+            body.pop("parents")
+            placed = f" (couldn't place it in '{folder_name}', so it went to My Drive)"
+            f = service.files().create(body=body, media_body=media, fields="id,name,webViewLink", supportsAllDrives=True).execute()
+    except Exception as e:
+        return f"Error saving to Google Drive: {e}"
+    return f"Saved '{f.get('name', name)}' to Google Drive{placed}: {f.get('webViewLink', '')} [id: {f.get('id')}]"
+
+
+def save_last_file(phone: str, name: str | None, folder_name: str | None) -> str:
+    from src.utils import recent_files
+
+    recent = recent_files.get(phone)
+    if not recent:
+        return "There is no recent file from the user to save (files are kept for 30 minutes after they are sent). Ask them to send it again."
+    original_name, mime, data = recent
+    return upload_to_drive(phone, (name or "").strip() or original_name, mime, data, folder_name)
+
+
+SAVE_LAST_FILE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "File name to save as. Omit to keep the original name."},
+        "folder_name": {"type": "string", "description": "Existing Drive folder to put it in. Omit for My Drive."},
+    },
+    "required": [],
+}
 
 SEARCH_FILES_SCHEMA = {
     "type": "object",

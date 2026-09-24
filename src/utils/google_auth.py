@@ -32,12 +32,37 @@ from src.config import (
 
 logger = logging.getLogger(__name__)
 
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+_G = "https://www.googleapis.com/auth/"
+CALENDAR_SCOPE = _G + "calendar"
+GMAIL_READ_SCOPE = _G + "gmail.readonly"
+GMAIL_SEND_SCOPE = _G + "gmail.send"
+GMAIL_MODIFY_SCOPE = _G + "gmail.modify"       # archive, labels, trash (never permanent delete)
+DRIVE_SCOPE = _G + "drive.readonly"
+DRIVE_FILE_SCOPE = _G + "drive.file"           # create files; no access to files Cue didn't make
+DOCS_SCOPE = _G + "documents"
+SHEETS_SCOPE = _G + "spreadsheets"
+TASKS_SCOPE = _G + "tasks"
+CONTACTS_SCOPE = _G + "contacts.readonly"
+OTHER_CONTACTS_SCOPE = _G + "contacts.other.readonly"  # people emailed but never saved
 SCOPES = [
-    "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
-    DRIVE_SCOPE,
+    CALENDAR_SCOPE, GMAIL_READ_SCOPE, GMAIL_SEND_SCOPE, GMAIL_MODIFY_SCOPE,
+    DRIVE_SCOPE, DRIVE_FILE_SCOPE, DOCS_SCOPE, SHEETS_SCOPE, TASKS_SCOPE,
+    CONTACTS_SCOPE, OTHER_CONTACTS_SCOPE,
+]
+# What google_connection_status reports, service by service. Tools check
+# their own scope at call time, so a token granted before a service was
+# added keeps working for everything it does have.
+SERVICES: list[tuple[str, str]] = [
+    ("Calendar", CALENDAR_SCOPE),
+    ("Gmail read", GMAIL_READ_SCOPE),
+    ("Gmail send", GMAIL_SEND_SCOPE),
+    ("Gmail organise (archive/labels/trash)", GMAIL_MODIFY_SCOPE),
+    ("Drive read", DRIVE_SCOPE),
+    ("Drive save", DRIVE_FILE_SCOPE),
+    ("Docs", DOCS_SCOPE),
+    ("Sheets", SHEETS_SCOPE),
+    ("Tasks", TASKS_SCOPE),
+    ("Contacts", CONTACTS_SCOPE),
 ]
 # Drive was added after the first users connected. A user may untick it on
 # the consent screen, and oauthlib refuses a grant whose scopes differ from
@@ -214,29 +239,38 @@ def google_connection_status(phone: str) -> str:
     except Exception:
         stored = None
     which = "their own Google account" if stored else "the shared Google account"
-    if has_drive(creds):
-        drive = "Drive access is granted too."
-    else:
-        drive = f"Drive access has not been granted yet; to add it, they open: {connect_link(phone)}"
-    return f"Google (Calendar and Gmail) is connected for this user via {which}. {drive} To switch accounts, open: {connect_link(phone)}"
+    granted = [name for name, scope in SERVICES if has_scope(creds, scope)]
+    missing = [name for name, scope in SERVICES if not has_scope(creds, scope)]
+    text = f"Google is connected for this user via {which}. Granted: {', '.join(granted) or 'nothing'}."
+    if missing:
+        text += f" Not granted yet: {', '.join(missing)}. To add them (one tap, keeps what is granted), they open: {connect_link(phone)}"
+    return text + f" To switch accounts, open: {connect_link(phone)}"
+
+
+def has_scope(creds: Credentials | None, scope: str) -> bool:
+    return bool(creds and creds.has_scopes([scope]))
 
 
 def has_drive(creds: Credentials | None) -> bool:
-    return bool(creds and creds.has_scopes([DRIVE_SCOPE]))
+    return has_scope(creds, DRIVE_SCOPE)
+
+
+def scope_not_granted(phone: str, service_name: str) -> str:
+    """Services were added after the first users connected, so a valid Google
+    token may lack one. The fix is the same personal link: Google keeps the
+    scopes already granted and adds the missing ones."""
+    if not get_google_credentials(phone):
+        return not_connected(service_name, phone)
+    if not PUBLIC_BASE_URL:
+        return f"{service_name} access has not been granted for this user, and no public URL is configured to offer a link."
+    return (
+        f"{service_name} access has not been granted for this user yet. Tell them to open this personal "
+        f"link (valid 30 minutes), sign in and allow it; what they already granted stays: {connect_link(phone)}"
+    )
 
 
 def drive_not_connected(phone: str) -> str:
-    """Drive arrived after the first users connected, so a valid Google token
-    may lack it. The fix is the same personal link: Google keeps the scopes
-    already granted and adds Drive."""
-    if not get_google_credentials(phone):
-        return not_connected("Google Drive", phone)
-    if not PUBLIC_BASE_URL:
-        return "Google Drive access has not been granted for this user, and no public URL is configured to offer a link."
-    return (
-        "Google Drive access has not been granted for this user yet (only Calendar and Gmail). Tell them to "
-        f"open this personal link (valid 30 minutes), sign in and allow Drive: {connect_link(phone)}"
-    )
+    return scope_not_granted(phone, "Google Drive")
 
 
 # --- Web OAuth flow -----------------------------------------------------------
@@ -291,7 +325,36 @@ def get_gmail_service(phone: str | None = None):
     return build("gmail", "v1", credentials=creds) if creds else None
 
 
-def get_drive_service(phone: str | None = None):
-    """None when Google is not connected *or* the token predates Drive."""
+def _scoped_service(phone: str | None, api: str, version: str, scope: str):
+    """None when Google is not connected *or* the token lacks this scope, so
+    the calling tool answers with the reconnect link instead of a 403."""
     creds = get_google_credentials(phone)
-    return build("drive", "v3", credentials=creds) if has_drive(creds) else None
+    return build(api, version, credentials=creds) if has_scope(creds, scope) else None
+
+
+def get_drive_service(phone: str | None = None):
+    return _scoped_service(phone, "drive", "v3", DRIVE_SCOPE)
+
+
+def get_drive_write_service(phone: str | None = None):
+    return _scoped_service(phone, "drive", "v3", DRIVE_FILE_SCOPE)
+
+
+def get_docs_service(phone: str | None = None):
+    return _scoped_service(phone, "docs", "v1", DOCS_SCOPE)
+
+
+def get_sheets_service(phone: str | None = None):
+    return _scoped_service(phone, "sheets", "v4", SHEETS_SCOPE)
+
+
+def get_tasks_service(phone: str | None = None):
+    return _scoped_service(phone, "tasks", "v1", TASKS_SCOPE)
+
+
+def get_people_service(phone: str | None = None):
+    return _scoped_service(phone, "people", "v1", CONTACTS_SCOPE)
+
+
+def get_gmail_modify_service(phone: str | None = None):
+    return _scoped_service(phone, "gmail", "v1", GMAIL_MODIFY_SCOPE)

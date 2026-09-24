@@ -24,8 +24,12 @@ from src.prompts.memory_agent import MEMORY_AGENT_PROMPT
 from src.prompts.data_agent import DATA_AGENT_PROMPT
 from src.prompts.images_agent import IMAGES_AGENT_PROMPT
 from src.prompts.drive_agent import DRIVE_AGENT_PROMPT
+from src.prompts.tasks_agent import TASKS_AGENT_PROMPT
 from src.tools.images import image_tools, IMAGE_TOOL_NAMES
 from src.tools.drive import build_drive_tools, DRIVE_TOOL_NAMES
+from src.tools.workspace import build_workspace_tools, WORKSPACE_TOOL_NAMES
+from src.tools.tasks import build_tasks_tools, TASKS_TOOL_NAMES
+from src.tools.contacts import build_contacts_tools, CONTACTS_TOOL_NAMES
 from src.config import BUSINESS_DATA_PHONES
 from src.tools.calendar import build_calendar_tools, CALENDAR_TOOL_NAMES
 from src.tools.email import build_email_tools, EMAIL_TOOL_NAMES
@@ -53,7 +57,7 @@ RESEARCH_TOOL_NAMES = ["WebSearch", "WebFetch"]
 ALL_TOOL_NAMES = (
     CALENDAR_TOOL_NAMES + EMAIL_TOOL_NAMES + NOTES_TOOL_NAMES + RESEARCH_TOOL_NAMES + DOCUMENT_TOOL_NAMES
     + REMINDER_TOOL_NAMES + BROWSER_TOOL_NAMES + MEMORY_TOOL_NAMES + DATA_TOOL_NAMES + BUSINESS_TOOL_NAMES
-    + IMAGE_TOOL_NAMES + DRIVE_TOOL_NAMES
+    + IMAGE_TOOL_NAMES + DRIVE_TOOL_NAMES + WORKSPACE_TOOL_NAMES + TASKS_TOOL_NAMES + CONTACTS_TOOL_NAMES
 )
 
 
@@ -126,6 +130,9 @@ class PersonalAssistant:
         owner = user_phone in BUSINESS_DATA_PHONES
         data_tools = build_data_tools(user_phone, profile.get("cue_user_id"), owner)
         drive_tools = build_drive_tools(user_phone)
+        workspace_tools = build_workspace_tools(user_phone)
+        tasks_tools = build_tasks_tools(user_phone)
+        contacts_tools = build_contacts_tools(user_phone)
 
         mcp_servers = {
             "calendar": create_sdk_mcp_server("calendar", tools=calendar_tools),
@@ -138,18 +145,21 @@ class PersonalAssistant:
             "data": create_sdk_mcp_server("data", tools=data_tools),
             "images": create_sdk_mcp_server("images", tools=image_tools),
             "drive": create_sdk_mcp_server("drive", tools=drive_tools),
+            "workspace": create_sdk_mcp_server("workspace", tools=workspace_tools),
+            "tasks": create_sdk_mcp_server("tasks", tools=tasks_tools),
+            "contacts": create_sdk_mcp_server("contacts", tools=contacts_tools),
         }
 
         agents = {
             "calendar_agent": AgentDefinition(
                 description="Handles Google Calendar: viewing, creating, and deleting events.",
                 prompt=CALENDAR_AGENT_PROMPT.format(**format_kwargs),
-                tools=CALENDAR_TOOL_NAMES,
+                tools=CALENDAR_TOOL_NAMES + CONTACTS_TOOL_NAMES,
             ),
             "email_agent": AgentDefinition(
-                description="Handles Gmail: reading and sending emails.",
+                description="Handles Gmail: reading, sending and organising emails (archive, labels, trash), reading attachments and saving them to Drive.",
                 prompt=EMAIL_AGENT_PROMPT.format(current_time=current_time),
-                tools=EMAIL_TOOL_NAMES + ["mcp__calendar__google_connect_link"],
+                tools=EMAIL_TOOL_NAMES + CONTACTS_TOOL_NAMES + ["mcp__calendar__google_connect_link"],
             ),
             "notes_agent": AgentDefinition(
                 description="Saves, lists, and searches the user's personal notes.",
@@ -177,9 +187,14 @@ class PersonalAssistant:
                 tools=DATA_TOOL_NAMES + (BUSINESS_TOOL_NAMES if owner else []),
             ),
             "drive_agent": AgentDefinition(
-                description="Finds and reads files in the user's Google Drive (Docs, Sheets, Slides, PDF, Word, text). Read-only.",
+                description="Google Drive, Docs and Sheets: finds and reads files, creates a Doc or Sheet, appends to one, saves the file the user just sent into Drive.",
                 prompt=DRIVE_AGENT_PROMPT.format(current_time=current_time),
-                tools=DRIVE_TOOL_NAMES + ["mcp__calendar__google_connect_link"],
+                tools=DRIVE_TOOL_NAMES + WORKSPACE_TOOL_NAMES + ["mcp__calendar__google_connect_link"],
+            ),
+            "tasks_agent": AgentDefinition(
+                description="The user's Google Tasks lists: show, add and tick off to-dos.",
+                prompt=TASKS_AGENT_PROMPT.format(**format_kwargs),
+                tools=TASKS_TOOL_NAMES + ["mcp__calendar__google_connect_link"],
             ),
             "images_agent": AgentDefinition(
                 description="Makes pictures: generates an image from a description, or draws a line/bar chart from numbers.",

@@ -17,38 +17,50 @@ def _attachments(part: dict, found: list[dict]) -> None:
         _attachments(child, found)
 
 
+def find_attachment(service, message_id: str, filename: str | None) -> tuple[dict | None, str | None]:
+    """The attachment part the user means, or (None, why-not)."""
+    msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+    found: list[dict] = []
+    _attachments(msg.get("payload", {}), found)
+    if not found:
+        return None, "That email has no attachments."
+    names = [p["filename"] for p in found]
+    if filename:
+        part = next((p for p in found if p["filename"].lower() == filename.lower()), None)
+        if not part:
+            return None, f"No attachment called {filename!r}. This email has: {', '.join(names)}"
+        return part, None
+    if len(found) == 1:
+        return found[0], None
+    return None, f"Which attachment? This email has: {', '.join(names)}"
+
+
+def download_attachment(service, message_id: str, part: dict) -> bytes:
+    blob = service.users().messages().attachments().get(
+        userId="me", messageId=message_id, id=part["body"]["attachmentId"]
+    ).execute()
+    return base64.urlsafe_b64decode(blob["data"] + "=" * (-len(blob["data"]) % 4))
+
+
+def part_mime(part: dict) -> str:
+    return (part.get("mimeType") or "").split(";")[0].strip().lower()
+
+
 def read_attachment(phone: str, message_id: str, filename: str | None) -> str:
     service = get_gmail_service(phone)
     if not service:
         return not_connected("Gmail", phone)
     try:
-        msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
-        found: list[dict] = []
-        _attachments(msg.get("payload", {}), found)
-        if not found:
-            return "That email has no attachments."
-        names = [p["filename"] for p in found]
-        part = None
-        if filename:
-            part = next((p for p in found if p["filename"].lower() == filename.lower()), None)
-            if not part:
-                return f"No attachment called {filename!r}. This email has: {', '.join(names)}"
-        elif len(found) == 1:
-            part = found[0]
-        else:
-            return f"Which attachment? This email has: {', '.join(names)}"
-
-        mime = (part.get("mimeType") or "").split(";")[0].strip().lower()
+        part, err = find_attachment(service, message_id, filename)
+        if err:
+            return err
+        mime = part_mime(part)
         if mime not in SUPPORTED_TYPES:
-            return f"{part['filename']} is {mime or 'an unknown type'}; I can read PDF, Word (.docx) and plain-text attachments."
+            return f"{part['filename']} is {mime or 'an unknown type'}; I can read PDF, Word (.docx) and plain-text attachments (it can still be saved to Drive)."
         size = part.get("body", {}).get("size") or 0
         if size > MAX_BYTES:
             return f"{part['filename']} is too large to read ({size // 1_000_000} MB; the limit is 10 MB)."
-
-        blob = service.users().messages().attachments().get(
-            userId="me", messageId=message_id, id=part["body"]["attachmentId"]
-        ).execute()
-        data = base64.urlsafe_b64decode(blob["data"] + "=" * (-len(blob["data"]) % 4))
+        data = download_attachment(service, message_id, part)
         text = extract_text(data, mime)
     except DocumentError as e:
         return str(e)

@@ -15,7 +15,7 @@ from src.config import PORT, PUBLIC_BASE_URL, TEST_WEBHOOK_TOKEN, TWILIO_AUTH_TO
 from src import database as db
 from src.database import init_database, upsert_user, save_chat_message
 from src.tools.reminders import next_due, user_tz
-from src.utils import documents, media_ai, media_store
+from src.utils import documents, media_ai, media_store, recent_files
 from src.utils.approvals import booking_gate
 from src.utils.google_auth import (
     get_authorization_url,
@@ -99,12 +99,15 @@ def _ingest_attachment(
     """Download and store one attachment; return the system line the agent
     sees, stating plainly what happened so it can't claim otherwise."""
     try:
+        data, filename = documents.download_media(url)
+        filename = filename or caption_filename or documents.default_filename(content_type, message_sid)
+        # Keep the original for a while so "save that to my Drive" can upload
+        # it, whatever the type; ingestion below stores extracted text only.
+        recent_files.remember(phone, filename, content_type.split(";")[0].strip().lower(), data)
         if content_type.split(";")[0].strip().lower() not in documents.SUPPORTED_TYPES:
             raise documents.DocumentError(
                 "I can't read that file type yet. I can read PDF, Word (.docx) and plain-text files."
             )
-        data, filename = documents.download_media(url)
-        filename = filename or caption_filename or documents.default_filename(content_type, message_sid)
         result = documents.ingest(phone, data, content_type, filename)
     except documents.DocumentError as e:
         return f"[Document: the user attached a file ({content_type}) that was NOT saved. Reason: {e}]"
@@ -135,11 +138,13 @@ def _transcribe_attachment(url: str, content_type: str) -> str:
     return f"[Voice note, transcribed] {text}"
 
 
-def _prepare_photo(url: str) -> tuple[str, tuple[str, str] | None]:
+def _prepare_photo(phone: str, url: str, content_type: str, message_sid: str | None) -> tuple[str, tuple[str, str] | None]:
     """A photo is shown to the model as an image block; the note tells it
     one is attached so it looks rather than asks."""
     try:
         data, _ = documents.download_media(url)
+        ext = (content_type.split("/", 1)[-1] or "jpg").split(";")[0].replace("jpeg", "jpg")
+        recent_files.remember(phone, f"photo-{(message_sid or 'upload')[-6:]}.{ext}", content_type, data)
         media_type, b64 = media_ai.prepare_image(data)
     except (media_ai.MediaError, documents.DocumentError) as e:
         return f"[Photo: could not be read because {e}.]", None
@@ -188,7 +193,7 @@ async def _attach_media(
         if kind.startswith("audio/"):
             notes.append(await asyncio.to_thread(_transcribe_attachment, url, kind))
         elif kind.startswith("image/"):
-            note, image = await asyncio.to_thread(_prepare_photo, url)
+            note, image = await asyncio.to_thread(_prepare_photo, phone, url, kind, message_sid)
             notes.append(note)
             if image:
                 images.append(image)
