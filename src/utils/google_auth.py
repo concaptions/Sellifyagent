@@ -32,11 +32,18 @@ from src.config import (
 
 logger = logging.getLogger(__name__)
 
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
+    DRIVE_SCOPE,
 ]
+# Drive was added after the first users connected. A user may untick it on
+# the consent screen, and oauthlib refuses a grant whose scopes differ from
+# the request unless told to relax; we would rather store what was granted
+# and let each tool check its own scope.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 # Shared (legacy) token: configurable so a persistent volume can be mounted
 # (e.g. /data/token.json) on hosts with an ephemeral filesystem.
@@ -167,7 +174,9 @@ def _refresh(creds: Credentials | None, save) -> Credentials | None:
 def _shared_credentials() -> Credentials | None:
     if not os.path.exists(_TOKEN_FILE):
         return None
-    creds = Credentials.from_authorized_user_file(_TOKEN_FILE, SCOPES)
+    # Stored tokens keep the scopes they were actually granted (read from the
+    # JSON), so has_scopes() tells the truth and pre-Drive tokens keep working.
+    creds = Credentials.from_authorized_user_file(_TOKEN_FILE)
 
     def save(text: str) -> None:
         with open(_TOKEN_FILE, "w") as f:
@@ -187,7 +196,7 @@ def get_google_credentials(phone: str | None = None) -> Credentials | None:
             logger.debug("Google token lookup skipped (no DB)", exc_info=True)
             stored = None
         if stored:
-            creds = Credentials.from_authorized_user_info(json.loads(stored), SCOPES)
+            creds = Credentials.from_authorized_user_info(json.loads(stored))
             creds = _refresh(creds, lambda text: db.set_google_tokens(phone, text))
             if creds:
                 return creds
@@ -199,13 +208,35 @@ def get_google_credentials(phone: str | None = None) -> Credentials | None:
 def google_connection_status(phone: str) -> str:
     creds = get_google_credentials(phone)
     if not creds:
-        return not_connected("Google (Calendar and Gmail)", phone)
+        return not_connected("Google (Calendar, Gmail and Drive)", phone)
     try:
         stored = db.get_google_tokens(phone)
     except Exception:
         stored = None
     which = "their own Google account" if stored else "the shared Google account"
-    return f"Google is connected for this user via {which}. To switch accounts, open: {connect_link(phone)}"
+    if has_drive(creds):
+        drive = "Drive access is granted too."
+    else:
+        drive = f"Drive access has not been granted yet; to add it, they open: {connect_link(phone)}"
+    return f"Google (Calendar and Gmail) is connected for this user via {which}. {drive} To switch accounts, open: {connect_link(phone)}"
+
+
+def has_drive(creds: Credentials | None) -> bool:
+    return bool(creds and creds.has_scopes([DRIVE_SCOPE]))
+
+
+def drive_not_connected(phone: str) -> str:
+    """Drive arrived after the first users connected, so a valid Google token
+    may lack it. The fix is the same personal link: Google keeps the scopes
+    already granted and adds Drive."""
+    if not get_google_credentials(phone):
+        return not_connected("Google Drive", phone)
+    if not PUBLIC_BASE_URL:
+        return "Google Drive access has not been granted for this user, and no public URL is configured to offer a link."
+    return (
+        "Google Drive access has not been granted for this user yet (only Calendar and Gmail). Tell them to "
+        f"open this personal link (valid 30 minutes), sign in and allow Drive: {connect_link(phone)}"
+    )
 
 
 # --- Web OAuth flow -----------------------------------------------------------
@@ -258,3 +289,9 @@ def get_calendar_service(phone: str | None = None):
 def get_gmail_service(phone: str | None = None):
     creds = get_google_credentials(phone)
     return build("gmail", "v1", credentials=creds) if creds else None
+
+
+def get_drive_service(phone: str | None = None):
+    """None when Google is not connected *or* the token predates Drive."""
+    creds = get_google_credentials(phone)
+    return build("drive", "v3", credentials=creds) if has_drive(creds) else None

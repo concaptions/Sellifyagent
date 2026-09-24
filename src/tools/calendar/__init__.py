@@ -54,7 +54,7 @@ def build_calendar_tools(user_phone: str) -> list[SdkMcpTool]:
 
     @tool(
         "google_connect_link",
-        "Whether this user's Google (Calendar + Gmail) is connected, and their personal link to connect or switch accounts.",
+        "Whether this user's Google (Calendar + Gmail, and Drive) is connected, and their personal link to connect, add Drive, or switch accounts.",
         EMPTY_SCHEMA,
     )
     async def google_connect_link(args: dict) -> dict:

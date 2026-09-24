@@ -34,7 +34,7 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Voice notes | ✅ `audio/*` media → Whisper (`OPENAI_TRANSCRIBE_MODEL`, default `whisper-1`) → `[Voice note, transcribed] …` in the message. Live-verified 2026-09-23 (flac sample; transcript recalled next turn) |
 | Photos (vision) | ✅ `image/*` media → PIL downscale ≤1568 px JPEG → base64 image block via SDK streaming input (`_user_turn_with_images`). Live-verified 2026-09-23 (described a public test photo). Twilio media 404 right after the webhook is retried (gotcha 13) |
 | Image generation + charts | ✅ `images_agent`: `generate_image` (OpenAI `OPENAI_IMAGE_MODEL`, default `gpt-image-1`) and `render_chart` (matplotlib) → `/media/<token>.png` → attached as WhatsApp image. Live-verified 2026-09-23 (BP line chart 47 KB; generated poster 2.2 MB, both served) |
-| Google per user | ⚠️ Each WhatsApp number connects its **own** Google (Calendar + Gmail): tokens in `sellify_users.profile._google_tokens`; personal 30-min link `/oauth/google/start?t=<nonce.exp.sig>` (nonce→phone map in memory, HMAC with `TEST_WEBHOOK_TOKEN`; phone never in the URL); `/start` without a valid token → 403. Owner numbers (`BUSINESS_DATA_PHONES`) fall back to the shared `/data/token.json` (the client's account). Calendar/email tools are per-user closures; `google_connect_link` tool reports status + link. Live-verified 2026-09-23 (stranger → personal link → 307 to accounts.google.com; tampered/bare → 403; owner → shared account). Real consent round-trips confirmed 2026-09-24 (the client and one more user connected via their links; callbacks 200, tokens used the same turn). **Google Drive: not connected at all** (no scope) — the client asked for Drive files; adding `drive.readonly` + a `drive_agent` awaits the user's OK (access-scope change; everyone reconnects once). Google consent screen is in Testing mode: each new user's Gmail must be added as a test user (or publish the app) |
+| Google per user | ⚠️ Each WhatsApp number connects its **own** Google (Calendar + Gmail): tokens in `sellify_users.profile._google_tokens`; personal 30-min link `/oauth/google/start?t=<nonce.exp.sig>` (nonce→phone map in memory, HMAC with `TEST_WEBHOOK_TOKEN`; phone never in the URL); `/start` without a valid token → 403. Owner numbers (`BUSINESS_DATA_PHONES`) fall back to the shared `/data/token.json` (the client's account). Calendar/email tools are per-user closures; `google_connect_link` tool reports status + link. Live-verified 2026-09-23 (stranger → personal link → 307 to accounts.google.com; tampered/bare → 403; owner → shared account). Real consent round-trips confirmed 2026-09-24 (the client and one more user connected via their links; callbacks 200, tokens used the same turn). **Google Drive (read-only) added 2026-09-24** (user-approved after the client asked for Drive files): `drive.readonly` in `SCOPES`; `drive_agent` with `search_drive_files` (name + fullText, shared drives included) and `read_drive_file` (Docs/Sheets/Slides exported as text; PDF/DOCX/text via `extract_text`; ≤12k chars; nothing stored). Stored tokens are loaded with the scopes they were granted (`from_authorized_user_info(info)` with no scopes arg), so pre-Drive tokens keep working for Calendar/Gmail and `has_drive(creds)` is truthful; the Drive tools then return `drive_not_connected` = the same personal link (Google keeps the earlier grants; `OAUTHLIB_RELAX_TOKEN_SCOPE=1` so a partial grant is still stored). **Everyone already connected (client included, and the shared owner token) must open their link once more and allow Drive** — not yet done by anyone. Google consent screen is in Testing mode: each new user's Gmail must be added as a test user (or publish the app) |
 | Code on `main` | ❌ Only README — all code is on branch `claude/jolly-ramanujan-l0q173`, draft PR #1 |
 
 ## Request flow
@@ -71,7 +71,9 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
   `/oauth/google/start`, `/oauth/google/callback`, `/oauth/google/status`
 - `src/agents/assistant.py` — builds `ClaudeAgentOptions`, per-user session ids
 - `src/prompts/*.py` — manager + 4 subagent prompts (small, principle-based)
-- `src/tools/{calendar,email,notes,documents,reminders,browser,memory,data}/` — SDK `@tool` functions.
+- `src/tools/{calendar,email,notes,documents,reminders,browser,memory,data,drive,images}/` — SDK `@tool` functions.
+  `email/`: `read_emails` (search + snippet), `read_email` (full body), `read_email_attachment`, `send_email`.
+  `drive/files.py`: read-only Drive search + read (per-user closure; `get_drive_service` is None without the scope).
   `data/records.py`: per-user Cue records for all; `describe_business_data`/`query_business_data`
   built only when `user_phone in BUSINESS_DATA_PHONES` (`db.run_business_query`: one SELECT,
   `SET LOCAL ROLE sellify_reader`, READ ONLY, 10 s timeout, 50 rows).
@@ -131,7 +133,8 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
 **Google OAuth** — client "cue" in GCP project `cue-rich-sng`, Web application type
 - Redirect URI: `https://sellifyagent-production.up.railway.app/oauth/google/callback`
 - Consent screen in **Testing** mode; test user `concaptions@gmail.com` (the connected account)
-- Scopes: calendar, gmail.readonly, gmail.send. Per-user tokens since 2026-09-23; the shared
+- Scopes: calendar, gmail.readonly, gmail.send, drive.readonly (since 2026-09-24; add it on the
+  consent screen too). Per-user tokens since 2026-09-23; the shared
   `/data/token.json` (client's account) is the fallback for owner numbers only.
 - Connect: the user asks Cue ("connect my Google") and opens the personal link. Admin check of
   the shared token: `GET /oauth/google/status`.
@@ -274,6 +277,9 @@ subscription login is not allowed for a deployed product). Model is **not pinned
   Postgres role with SELECT on exactly three tables, not SQL parsing.
 - 2026-09-23 n8n Cue path switched off (Twilio subscription deleted, user decision); assistant
   renamed Cue; typing indicator added (Twilio beta endpoint, best effort).
+- 2026-09-24 Gmail reads go beyond the snippet (`read_email`, `read_email_attachment`) after the
+  client hit a cut-off date. Google Drive added read-only (user-approved via their own "connect my
+  Google drive" test): scope-per-tool checks, existing tokens untouched, reconnect adds Drive.
 - 2026-09-23 Booking worker (user-approved): guest bookings only, in the app process (Dockerfile
   on the Playwright image) rather than a separate service; approval and no-login/no-payment rules
   enforced in code, not prompts. Repeating reminders: ≥10 min, user-confirmed, "stop" in code.

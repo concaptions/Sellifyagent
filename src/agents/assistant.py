@@ -23,7 +23,9 @@ from src.prompts.browser_agent import BROWSER_AGENT_PROMPT
 from src.prompts.memory_agent import MEMORY_AGENT_PROMPT
 from src.prompts.data_agent import DATA_AGENT_PROMPT
 from src.prompts.images_agent import IMAGES_AGENT_PROMPT
+from src.prompts.drive_agent import DRIVE_AGENT_PROMPT
 from src.tools.images import image_tools, IMAGE_TOOL_NAMES
+from src.tools.drive import build_drive_tools, DRIVE_TOOL_NAMES
 from src.config import BUSINESS_DATA_PHONES
 from src.tools.calendar import build_calendar_tools, CALENDAR_TOOL_NAMES
 from src.tools.email import build_email_tools, EMAIL_TOOL_NAMES
@@ -51,7 +53,7 @@ RESEARCH_TOOL_NAMES = ["WebSearch", "WebFetch"]
 ALL_TOOL_NAMES = (
     CALENDAR_TOOL_NAMES + EMAIL_TOOL_NAMES + NOTES_TOOL_NAMES + RESEARCH_TOOL_NAMES + DOCUMENT_TOOL_NAMES
     + REMINDER_TOOL_NAMES + BROWSER_TOOL_NAMES + MEMORY_TOOL_NAMES + DATA_TOOL_NAMES + BUSINESS_TOOL_NAMES
-    + IMAGE_TOOL_NAMES
+    + IMAGE_TOOL_NAMES + DRIVE_TOOL_NAMES
 )
 
 
@@ -123,6 +125,7 @@ class PersonalAssistant:
         memory_tools = build_memory_tools(user_phone)
         owner = user_phone in BUSINESS_DATA_PHONES
         data_tools = build_data_tools(user_phone, profile.get("cue_user_id"), owner)
+        drive_tools = build_drive_tools(user_phone)
 
         mcp_servers = {
             "calendar": create_sdk_mcp_server("calendar", tools=calendar_tools),
@@ -134,6 +137,7 @@ class PersonalAssistant:
             "memory": create_sdk_mcp_server("memory", tools=memory_tools),
             "data": create_sdk_mcp_server("data", tools=data_tools),
             "images": create_sdk_mcp_server("images", tools=image_tools),
+            "drive": create_sdk_mcp_server("drive", tools=drive_tools),
         }
 
         agents = {
@@ -171,6 +175,11 @@ class PersonalAssistant:
                 description="Answers from the database: the user's earlier records (health log, personas, past reminders, past chats) and, for owners, the business tables (leads, products, knowledge base).",
                 prompt=DATA_AGENT_PROMPT.format(**format_kwargs),
                 tools=DATA_TOOL_NAMES + (BUSINESS_TOOL_NAMES if owner else []),
+            ),
+            "drive_agent": AgentDefinition(
+                description="Finds and reads files in the user's Google Drive (Docs, Sheets, Slides, PDF, Word, text). Read-only.",
+                prompt=DRIVE_AGENT_PROMPT.format(current_time=current_time),
+                tools=DRIVE_TOOL_NAMES + ["mcp__calendar__google_connect_link"],
             ),
             "images_agent": AgentDefinition(
                 description="Makes pictures: generates an image from a description, or draws a line/bar chart from numbers.",
