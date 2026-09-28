@@ -6,7 +6,10 @@ Read it before exploring the codebase; it usually answers "where is X" without o
 @MEMORY.md
 
 ## Working efficiently (token budget)
-- Start from MEMORY.md's file map. Open only the files the task touches; use `grep -n`
+- Start with the knowledge graph: `graphify query "<question>"`, `graphify explain "<X>"`,
+  `graphify path "<A>" "<B>"` (see the graphify section below). It holds the code structure plus
+  the rationale from MEMORY.md/CLAUDE.md, so most "where is X / how does Y work" questions need no
+  file reads. Then MEMORY.md's file map. Open only the files the task touches; use `grep -n`
   and `sed -n 'A,Bp'` for targeted reads instead of reading whole files.
 - Don't re-verify facts MEMORY.md already records unless the task depends on them changing.
 - Prefer one validated change + one test over several speculative pushes (each push
@@ -61,3 +64,13 @@ permissions. Report results, not plans. Only stop and ask for:
 ## Keeping memory current
 Update MEMORY.md (status, backlog, decision log) in the same commit as any change that
 alters state. Edit in place; keep it short.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

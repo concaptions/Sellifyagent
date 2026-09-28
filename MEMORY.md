@@ -67,6 +67,13 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
 `app.py` attaches our own media URLs found in the reply as WhatsApp images.
 
 ## File map
+- `graphify-out/` — **knowledge graph of this repo** (graphify, 2026-09-28): `graph.json` (540 nodes: every
+  module/function/class from the AST plus ~40 concept nodes carrying the rationale from MEMORY.md, CLAUDE.md
+  and README.md), `GRAPH_REPORT.md`, `graph.html` (open in a browser), `manifest.json`. Query it before
+  reading files: `graphify query "…"`, `graphify explain "…"`, `graphify path "A" "B"`. After code changes run
+  `graphify update .` (AST only, no LLM) and commit `graph.json`; after MEMORY.md changes re-run the
+  `/graphify . --update` skill so the concept nodes follow. The skill lives in `.claude/skills/graphify/`;
+  `.claude/settings.json` installs `graphifyy` on session start and nudges toward the graph before grep/Read.
 - `app.py` — FastAPI routes: `/whatsapp/webhook`, `/webhook/test`, `/health`,
   `/oauth/google/start`, `/oauth/google/callback`, `/oauth/google/status`
 - `src/agents/assistant.py` — builds `ClaudeAgentOptions`, per-user session ids
