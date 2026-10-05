@@ -242,6 +242,9 @@ inherit) since 2026-09-24 for cost. Every turn logs `Turn cost: $…, models=…
     of `google_auth.py` and env var names to the client (2026-10-04). `ClaudeAgentOptions(disallowed_tools=
     [Read, Write, Edit, Glob, Grep, LS, Bash, …])` removes them; the manager prompt also says it is a product,
     not a dev tool. Keep `cwd` unchanged: transcripts are keyed by cwd, changing it resets everyone's memory.
+    Also: the runtime loaded the repo's CLAUDE.md/MEMORY.md from cwd into every turn (Cue repeated a
+    MEMORY.md note verbatim after the lockdown), costing ~10k+ tokens per turn and exposing infra notes;
+    `.dockerignore` now keeps CLAUDE.md, MEMORY.md, README.md, `.claude/` and `graphify-out/` out of the image.
 22. `sellify_reminders.attempts` counts tries of one occurrence: reset it to 0 when a repeating reminder is
     rescheduled, or `attempts < 3` in `claim_due_reminders` kills the series after three firings.
 23. `ALLOWED_PHONES` (Railway env, E.164 list) closes the WhatsApp number to a test group: unknown numbers get
