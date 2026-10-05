@@ -218,6 +218,15 @@ class PersonalAssistant:
             system_prompt=MANAGER_PROMPT.format(**format_kwargs),
             mcp_servers=mcp_servers,
             allowed_tools=ALL_TOOL_NAMES,
+            # Claude Code's file tools never prompt, so "dontAsk" alone did not
+            # stop them: the assistant once read its own source on the server
+            # and quoted line numbers and env var names to a user. Remove every
+            # built-in that touches the filesystem or shell; the MCP tools above
+            # plus WebSearch/WebFetch (research_agent) and Task (subagents) remain.
+            disallowed_tools=[
+                "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "NotebookRead",
+                "Glob", "Grep", "LS", "Bash", "BashOutput", "KillShell", "TodoWrite", "Skill",
+            ],
             agents=agents,
             permission_mode="dontAsk",
             resume=resume_id,

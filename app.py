@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, Response
@@ -11,7 +12,7 @@ from twilio.request_validator import RequestValidator
 
 from src.agents.assistant import AGENT_ERROR_REPLY, PersonalAssistant
 from src.channels.whatsapp import TYPING_REFRESH_SECONDS, WhatsAppChannel
-from src.config import PORT, PUBLIC_BASE_URL, TEST_WEBHOOK_TOKEN, TWILIO_AUTH_TOKEN
+from src.config import ALLOWED_PHONES, BUSINESS_DATA_PHONES, PORT, PUBLIC_BASE_URL, TEST_WEBHOOK_TOKEN, TWILIO_AUTH_TOKEN
 from src import database as db
 from src.database import init_database, upsert_user, save_chat_message
 from src.tools.reminders import next_due, user_tz
@@ -31,6 +32,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 REMINDER_POLL_SECONDS = 60
+
+# Closed-test gate (see ALLOWED_PHONES in config). Unknown numbers get this
+# once a day at most: a reply costs a Twilio message, so a stranger can't make
+# us pay per text either.
+_PRIVATE_REPLY = "This assistant is in a private test and isn't open to new users yet."
+_PRIVATE_NOTICE_SECONDS = 24 * 60 * 60
+_private_notice_sent: dict[str, float] = {}
+
+
+def _allowed_sender(phone: str) -> bool:
+    return not ALLOWED_PHONES or phone in ALLOWED_PHONES or phone in BUSINESS_DATA_PHONES
+
+
+def _notify_private_once(phone: str, whatsapp_from: str) -> None:
+    now = time.time()
+    if now - _private_notice_sent.get(phone, 0) < _PRIVATE_NOTICE_SECONDS:
+        return
+    _private_notice_sent[phone] = now
+    try:
+        whatsapp.send_message(whatsapp_from, _PRIVATE_REPLY)
+    except Exception:
+        logger.warning("Private-test notice to unknown sender failed", exc_info=True)
 _STOP_WORDS = re.compile(r"^\s*(stop|stop (the |my )?reminders?|stop reminding me)\s*[.!]*\s*$", re.IGNORECASE)
 
 os.makedirs("db", exist_ok=True)
@@ -79,6 +102,10 @@ async def whatsapp_webhook(request: Request):
 
     whatsapp_from = form.get("From", "")
     phone = whatsapp_from.replace("whatsapp:", "")
+    if not _allowed_sender(phone):
+        logger.info("Dropped message from a number outside ALLOWED_PHONES")
+        asyncio.create_task(asyncio.to_thread(_notify_private_once, phone, whatsapp_from))
+        return Response(content="", media_type="text/xml")
     message = (form.get("Body") or "").strip()
     media = [
         (form.get(f"MediaUrl{i}"), form.get(f"MediaContentType{i}", ""))

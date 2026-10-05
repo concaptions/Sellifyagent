@@ -37,6 +37,12 @@ TEST_WEBHOOK_TOKEN = os.getenv("TEST_WEBHOOK_TOKEN", "")
 # list. Unset = nobody.
 BUSINESS_DATA_PHONES = {p.strip() for p in os.getenv("BUSINESS_DATA_PHONES", "").split(",") if p.strip()}
 
+# Who may use the assistant at all (E.164, comma-separated). Empty = open to
+# anyone who messages the number (the state before the closed test). When set,
+# owner numbers are always included; everyone else gets one short notice and
+# no agent turn, so a stranger can't run up the bill or get a session.
+ALLOWED_PHONES = {p.strip() for p in os.getenv("ALLOWED_PHONES", "").split(",") if p.strip()}
+
 WHATSAPP_CHAR_LIMIT = 1600
 
 PORT = int(os.getenv("PORT", "5000"))

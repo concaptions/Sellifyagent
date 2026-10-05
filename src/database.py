@@ -748,9 +748,14 @@ def finish_reminder(reminder_id: int, next_due: datetime | None, error: str | No
                 (error[:500], reminder_id),
             )
         elif next_due:
+            # attempts counts delivery tries of *this* occurrence, so it must
+            # go back to 0 here: left alone it accumulated across occurrences
+            # and the claim query's `attempts < 3` silently killed every
+            # repeating reminder after its third firing (seen live, Oct 2026).
             cur.execute(
                 """UPDATE sellify_reminders
-                   SET status = 'pending', due_at = %s, last_sent_at = NOW(), last_error = NULL, updated_at = NOW()
+                   SET status = 'pending', due_at = %s, attempts = 0, last_sent_at = NOW(), last_error = NULL,
+                       updated_at = NOW()
                    WHERE id = %s""",
                 (next_due, reminder_id),
             )

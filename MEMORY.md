@@ -24,7 +24,7 @@ Notes, and Web research. Product direction: "Instinct"-style assistant
 | Document upload (PDF/DOCX/text) | ✅ Live-verified 2026-09-23 from a real phone (4 MB PDF → 252 chunks embedded, ~1 min) and via signed replay (Q&A + delete). Stores extracted text only |
 | Webhook security | ✅ Real Twilio signatures pass (real phone); forged → 403; unsigned `/webhook/test` → 404 |
 | Web search | ✅ Claude Code built-in `WebSearch`/`WebFetch` (no Tavily key); live-verified 2026-09-23 (same-day headline with source URL; page fetch) |
-| Reminders + proactive follow-ups | ✅ `sellify_reminders` + `reminders_agent` + 60 s scheduler; live-verified 2026-09-23 via `/webhook/test`. Repeating reminders: min every 10 min, created only after the user OKs the schedule, every message carries "Reply *stop*", and "stop" is handled in `app.py` code. **Not yet fired to a real phone** |
+| Reminders + proactive follow-ups | ✅ `sellify_reminders` + `reminders_agent` + 60 s scheduler; live-verified 2026-09-23 via `/webhook/test`. Repeating reminders: min every 10 min, created only after the user OKs the schedule, every message carries "Reply *stop*", and "stop" is handled in `app.py` code. Fired to the client's real phone daily from 30 Sep. **Bug found 2026-10-05:** `attempts` was never reset after a successful send, so the claim query's `attempts < 3` silently killed every repeating reminder after its 3rd firing (row 7 stalled on 3 Oct). Fixed in `finish_reminder` (attempts = 0 on success); row 7 reset to resume 6 Oct 09:00 SGT |
 | Booking worker (browser) | ✅ `browser_agent` + Playwright (Dockerfile on Playwright image). Guest bookings only; login/password/card fields blocked in code; final click locked until the user's own "yes" (`src/utils/approvals.py`); screenshot proof via `/media/<token>.png`. Live-verified 2026-09-23 on httpbin's form: fill → approval question + screenshot → "no" declines → "yes" submits → result screenshot served |
 | Typing indicator | ✅ `_keep_typing` in `app.py` calls Twilio's typing-indicator API (public beta) every 20 s during a turn; 200 OK on real messages 2026-09-23 |
 | Database Q&A (`data_agent`) | ✅ Per-user Cue records (`pa_logs`, `pa_personas`, `pa_reminders`, `n8n_chat_histories` keyed `pa-<phone>`) for everyone; business tables (`leads`, `products`, `documents`) **only for phones in `BUSINESS_DATA_PHONES`** (Railway env var), read-only via Postgres role `sellify_reader` (SELECT grant + RLS policy, READ ONLY txn). Live-verified 2026-09-23 (lead funnel, September count, catalogue, KB; writes and outsiders refused). **`BUSINESS_DATA_PHONES` currently holds only a synthetic test number — user must put the real owner numbers in** |
@@ -237,6 +237,16 @@ inherit) since 2026-09-24 for cost. Every turn logs `Turn cost: $…, models=…
 18. A tool-builder signature mismatch (`build_reminder_tools`) once broke every turn after
     deploy with a 500. Before pushing agent/tool changes, run the full-options smoke check:
     `PersonalAssistant()._build_options(phone, profile)` for `{}` and a populated profile.
+21. **The agent could read its own source on the server.** Claude Code's Read/Grep/Glob never prompt, so
+    `permission_mode="dontAsk"` did not stop them, and the SDK's cwd is the app directory; Cue quoted a line
+    of `google_auth.py` and env var names to the client (2026-10-04). `ClaudeAgentOptions(disallowed_tools=
+    [Read, Write, Edit, Glob, Grep, LS, Bash, …])` removes them; the manager prompt also says it is a product,
+    not a dev tool. Keep `cwd` unchanged: transcripts are keyed by cwd, changing it resets everyone's memory.
+22. `sellify_reminders.attempts` counts tries of one occurrence: reset it to 0 when a repeating reminder is
+    rescheduled, or `attempts < 3` in `claim_due_reminders` kills the series after three firings.
+23. `ALLOWED_PHONES` (Railway env, E.164 list) closes the WhatsApp number to a test group: unknown numbers get
+    one notice per 24 h and no agent turn. Empty = open to everyone. Owner numbers are always allowed.
+    `/webhook/test` is not gated (token-protected, used by the probe with synthetic numbers).
 16. Playwright's sync API can't be used from the asyncio loop; the browser tools use the async
     API in-process (SDK tools run in the app's loop). Chromium as root needs `--no-sandbox`. In
     this sandbox set `PLAYWRIGHT_CHROMIUM_PATH=/opt/pw-browsers/chromium` to test locally.
@@ -248,10 +258,15 @@ inherit) since 2026-09-24 for cost. Every turn logs `Turn cost: $…, models=…
 2. Cue prompt parity: port the voice/rules from the handover `system-prompt.md`, personas,
    core_prompt from `pa_users.profile`. Reminders outside Twilio's 24 h window: register a WhatsApp content template and send
    reminders via it (else they fail with 63016).
-3. Pre-test hardening for ~20 testers (user asked for the plan 2026-09-24): tester allowlist,
-   first-message welcome flow, per-user daily cost to the DB, "disconnect Google" tool, spend alert
-   in the Anthropic console. User side: add each tester's Gmail as a Google test user, register a
-   WhatsApp template for >24 h reminders. Capacity is fine (24 GB / 24 vCPU limit, 1.1 GB peak).
+3. Pre-test hardening for ~20 testers (user asked for the plan 2026-09-24): tester allowlist **done
+   2026-10-05 (`ALLOWED_PHONES`, unset = open; user must set it)**; still to do: first-message welcome
+   flow, per-user daily cost to the DB, "disconnect Google" tool, spend alert in the Anthropic console.
+   User side: add each tester's Gmail as a Google test user, register a WhatsApp template for >24 h
+   reminders, and **enable the Google APIs in GCP project `cue-rich-sng`** — the client saw "Tasks is off,
+   go to cloud to turn it on" (2026-10-01), i.e. the Tasks API is not enabled; Docs, Sheets, People
+   (Contacts) and Drive APIs likely need enabling too. Capacity is fine (24 GB / 24 vCPU, 1.1 GB peak).
+   Client also asked to **move Drive files between folders**: needs the full `drive` scope (drive.file
+   only covers files Cue created) — a user decision, not built.
 4. Booking worker follow-ups: live-verify on real booking sites; sites with captchas/JS-heavy
    widgets may need per-site handling; browser sessions and approvals are in-memory (lost on
    redeploy). Logged-in / payment bookings **still need explicit user decisions on credential
