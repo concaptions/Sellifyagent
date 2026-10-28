@@ -43,6 +43,13 @@ BUSINESS_DATA_PHONES = {p.strip() for p in os.getenv("BUSINESS_DATA_PHONES", "")
 # no agent turn, so a stranger can't run up the bill or get a session.
 ALLOWED_PHONES = {p.strip() for p in os.getenv("ALLOWED_PHONES", "").split(",") if p.strip()}
 
+# /admin: a password-protected page where the client submits a new user's
+# Gmail so the developer can add it as a Google OAuth test user (Google has no
+# API for that while the app is in Testing). Unset password = page disabled.
+ADMIN_PANEL_PASSWORD = os.getenv("ADMIN_PANEL_PASSWORD", "")
+ADMIN_NOTIFY_EMAIL = os.getenv("ADMIN_NOTIFY_EMAIL", "concaptions@gmail.com")
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "cue-rich-sng")
+
 WHATSAPP_CHAR_LIMIT = 1600
 
 PORT = int(os.getenv("PORT", "5000"))

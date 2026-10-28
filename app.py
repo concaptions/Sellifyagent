@@ -10,6 +10,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 import uvicorn
 from twilio.request_validator import RequestValidator
 
+from src.admin_panel import router as admin_router
 from src.agents.assistant import AGENT_ERROR_REPLY, PersonalAssistant
 from src.channels.whatsapp import TYPING_REFRESH_SECONDS, WhatsAppChannel
 from src.config import ALLOWED_PHONES, BUSINESS_DATA_PHONES, PORT, PUBLIC_BASE_URL, TEST_WEBHOOK_TOKEN, TWILIO_AUTH_TOKEN
@@ -77,6 +78,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Cue (Sellify)", lifespan=lifespan)
+app.include_router(admin_router)
 
 
 def _twilio_signature_valid(url: str, params: dict, signature: str) -> bool:
