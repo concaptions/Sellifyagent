@@ -49,6 +49,11 @@ ALLOWED_PHONES = {p.strip() for p in os.getenv("ALLOWED_PHONES", "").split(",") 
 ADMIN_PANEL_PASSWORD = os.getenv("ADMIN_PANEL_PASSWORD", "")
 ADMIN_NOTIFY_EMAIL = os.getenv("ADMIN_NOTIFY_EMAIL", "concaptions@gmail.com")
 GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "cue-rich-sng")
+# Sender for those admin emails: a Gmail address + its App Password (SMTP).
+# Preferred over the shared OAuth token, which Google expires every ~7 days
+# while the consent screen is in Testing.
+ADMIN_SMTP_ADDRESS = os.getenv("ADMIN_SMTP_ADDRESS", "")
+ADMIN_SMTP_APP_PASSWORD = os.getenv("ADMIN_SMTP_APP_PASSWORD", "").replace(" ", "")
 
 WHATSAPP_CHAR_LIMIT = 1600
 

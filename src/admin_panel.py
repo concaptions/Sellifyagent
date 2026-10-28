@@ -5,12 +5,18 @@ While the OAuth consent screen is in Testing, Google only lets listed test
 users connect, and it has no API for adding them, so this is a one-click
 hand-off rather than full automation. The email is sent from the shared owner
 token (the account the app already uses for owner numbers).
+
+Sending prefers a Gmail App Password over SMTP: the shared OAuth token dies
+every ~7 days while the consent screen is in Testing (seen live: invalid_grant
+on 2026-10-28), so it is only the fallback.
 """
+import asyncio
 import base64
 import html
 import logging
 import re
 import secrets
+import smtplib
 import time
 from email.mime.text import MIMEText
 
@@ -19,7 +25,9 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from googleapiclient.discovery import build
 
-from src.config import ADMIN_NOTIFY_EMAIL, ADMIN_PANEL_PASSWORD, GOOGLE_CLOUD_PROJECT
+from src.config import (
+    ADMIN_NOTIFY_EMAIL, ADMIN_PANEL_PASSWORD, ADMIN_SMTP_ADDRESS, ADMIN_SMTP_APP_PASSWORD, GOOGLE_CLOUD_PROJECT,
+)
 from src.utils.google_auth import GMAIL_SEND_SCOPE, _shared_credentials, has_scope
 
 logger = logging.getLogger(__name__)
@@ -66,11 +74,7 @@ def _audience_url() -> str:
     return f"https://console.cloud.google.com/auth/audience?project={GOOGLE_CLOUD_PROJECT}"
 
 
-def _send_notification(gmail: str, name: str, phone: str) -> str | None:
-    """Emails the developer. Returns None on success, else a short reason."""
-    creds = _shared_credentials()
-    if not creds or not has_scope(creds, GMAIL_SEND_SCOPE):
-        return "the owner Google account isn't connected with email sending"
+def _build_message(gmail: str, name: str, phone: str) -> MIMEText:
     lines = [
         "A new Cue user needs to be added as a Google test user.",
         "",
@@ -86,6 +90,30 @@ def _send_notification(gmail: str, name: str, phone: str) -> str | None:
     msg = MIMEText("\n".join(lines))
     msg["To"] = ADMIN_NOTIFY_EMAIL
     msg["Subject"] = f"Add Google test user: {gmail}"
+    return msg
+
+
+def _send_smtp(msg: MIMEText) -> str | None:
+    if not (ADMIN_SMTP_ADDRESS and ADMIN_SMTP_APP_PASSWORD):
+        return "no App Password sender configured"
+    msg["From"] = f"Cue admin <{ADMIN_SMTP_ADDRESS}>"
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
+            smtp.login(ADMIN_SMTP_ADDRESS, ADMIN_SMTP_APP_PASSWORD)
+            smtp.send_message(msg)
+    except smtplib.SMTPAuthenticationError:
+        logger.warning("Admin email: SMTP login rejected (check the App Password)")
+        return "the sender's App Password was rejected"
+    except Exception:
+        logger.warning("Admin email: SMTP send failed", exc_info=True)
+        return "the email server refused the message"
+    return None
+
+
+def _send_gmail_api(msg: MIMEText) -> str | None:
+    creds = _shared_credentials()
+    if not creds or not has_scope(creds, GMAIL_SEND_SCOPE):
+        return "the owner Google account isn't connected with email sending"
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     try:
         service = build("gmail", "v1", credentials=creds)
@@ -94,6 +122,17 @@ def _send_notification(gmail: str, name: str, phone: str) -> str | None:
         logger.warning("Admin test-user email failed", exc_info=True)
         return "Gmail refused the message"
     return None
+
+
+def _send_notification(gmail: str, name: str, phone: str) -> str | None:
+    """Emails the developer. Returns None on success, else a short reason."""
+    smtp_reason = _send_smtp(_build_message(gmail, name, phone))
+    if smtp_reason is None:
+        return None
+    api_reason = _send_gmail_api(_build_message(gmail, name, phone))
+    if api_reason is None:
+        return None
+    return smtp_reason if ADMIN_SMTP_ADDRESS else api_reason
 
 
 _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -146,7 +185,8 @@ async def admin_test_user(gmail: str = Form(...), name: str = Form(""), phone: s
     _sends = _recent(_sends, _SEND_WINDOW)
     if len(_sends) >= _SEND_LIMIT:
         return _render('<div class="err">Too many requests this hour. Please try again later.</div>', gmail, name, phone, 429)
-    reason = _send_notification(gmail, name, phone)
+    # Blocking network I/O; keep it off the event loop that serves WhatsApp.
+    reason = await asyncio.to_thread(_send_notification, gmail, name, phone)
     if reason:
         return _render(f'<div class="err">Couldn\'t send right now ({html.escape(reason)}). Please try again later.</div>',
                        gmail, name, phone, 503)
