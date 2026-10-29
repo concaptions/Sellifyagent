@@ -1,0 +1,68 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch *)",
+      "Bash(git fetch *)",
+      "Bash(git ls-tree *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push -u origin claude/*)",
+      "Bash(python3 -m compileall *)",
+      "Bash(python3 -m py_compile *)",
+      "Bash(pip show *)",
+      "Bash(grep *)",
+      "Bash(sed -n *)",
+      "Bash(ls *)",
+      "Bash(wc *)",
+      "Bash(find src *)",
+      "Bash(graphify *)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./credentials.json)",
+      "Read(./token.json)",
+      "Bash(cat .env*)",
+      "Bash(cat credentials.json*)",
+      "Bash(cat token.json*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v graphify >/dev/null 2>&1 || pip install -q graphifyy >/dev/null 2>&1 || true",
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v graphify >/dev/null 2>&1 && graphify hook-guard search || true",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v graphify >/dev/null 2>&1 && graphify hook-guard read || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
