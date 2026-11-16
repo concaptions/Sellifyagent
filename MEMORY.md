@@ -141,9 +141,12 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
   instance, so the user must deactivate them in the n8n UI (re-activating the main workflow
   would recreate the subscription). The n8n reminder scheduler still fires `pa_reminders`.
 
-**Google OAuth** — client "cue" in GCP project `cue-rich-sng`, Web application type
-- Redirect URI: `https://sellifyagent-production.up.railway.app/oauth/google/callback`
-- Consent screen in **Testing** mode; test user `concaptions@gmail.com` (the connected account)
+**Google OAuth** — since 2026-11-16 a new Web client in GCP project `sellifyagent` (owner sellifyagent@gmail.com);
+  `GOOGLE_CLIENT_ID/SECRET` and `GOOGLE_CLOUD_PROJECT=sellifyagent` on Railway point at it. The old client "cue" in
+  `cue-rich-sng` is still used by tokens made before the switch (each stored token carries its own client id/secret)
+  until they expire; reconnecting moves a user to the new client.
+- Redirect URI: `https://sellifyagent-production.up.railway.app/oauth/google/callback` (verified on the new client)
+- Consent screen in **Testing** mode; every user's Gmail must be a test user **of the new project** (old list didn't carry over)
 - Scopes: calendar, gmail.readonly, gmail.send, gmail.modify, drive.readonly, drive.file, documents,
   spreadsheets, tasks, contacts.readonly, contacts.other.readonly (all since 2026-09-24; add them on
   the consent screen too). Gmail + Drive scopes are "restricted": publishing beyond Testing needs
@@ -252,6 +255,11 @@ inherit) since 2026-09-24 for cost. Every turn logs `Turn cost: $…, models=…
     one notice per 24 h and no agent turn. Empty = open to everyone. Owner numbers are always allowed.
     `/webhook/test` is not gated (token-protected, used by the probe with synthetic numbers).
 24. **Google tokens die after ~7 days while the consent screen is in Testing** (`invalid_grant` on refresh). Seen live 2026-10-28 on the shared `/data/token.json` (connected late Sept). Every per-user connection has the same limit: users must reconnect weekly until the app is published (restricted scopes ⇒ Google verification + CASA). Don't build anything that must stay up on the OAuth token alone — the admin email uses an App Password.
+25. **Probes must never run a session-level `SET` on `DATABASE_URL`.** It goes through Supabase's transaction pooler,
+    which keeps the setting on that server connection and hands it to the app: `SET default_transaction_read_only = on`
+    in a read-only probe made every reminder poll fail ("read-only transaction") 2026-10-30 10:58–14:06 and
+    2026-11-16 11:11–13:33 UTC, and a deploy in that window skipped DB init. Use `BEGIN; SET TRANSACTION READ ONLY` /
+    `SET LOCAL` only. Repair: per-statement `set_config(name, reset_val from pg_settings, false)` swept over the pool.
 16. Playwright's sync API can't be used from the asyncio loop; the browser tools use the async
     API in-process (SDK tools run in the app's loop). Chromium as root needs `--no-sandbox`. In
     this sandbox set `PLAYWRIGHT_CHROMIUM_PATH=/opt/pw-browsers/chromium` to test locally.
@@ -322,6 +330,7 @@ inherit) since 2026-09-24 for cost. Every turn logs `Turn cost: $…, models=…
   append/create only, deletion is Gmail Trash only.
 - 2026-09-24 Model pinned to Sonnet 5 (user decision, cost): ~$0.02–0.06 per one-task message vs
   $0.05–0.15 on Opus; `CLAUDE_MODEL` env var allows an A/B without a deploy. Per-turn cost logged.
+- 2026-11-16 Google OAuth moved to a new client in project `sellifyagent` (user's choice; old client left for existing tokens).
 - 2026-10-28 Test users via an admin web page + email to the developer (user choice over a WhatsApp flow or console browser automation): Google offers no test-user API, and automating the console would mean storing an admin Google login.
 - 2026-09-23 Booking worker (user-approved): guest bookings only, in the app process (Dockerfile
   on the Playwright image) rather than a separate service; approval and no-login/no-payment rules
