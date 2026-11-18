@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, Response
@@ -296,6 +297,19 @@ async def media(token: str):
     if not png:
         raise HTTPException(status_code=404)
     return Response(content=png, media_type="image/png")
+
+
+_LOGO = Path(__file__).parent / "static" / "cue-logo.jpg"
+
+
+@app.get("/static/cue-logo.jpg")
+async def cue_logo():
+    # Public URL for Cue's WhatsApp profile picture: Twilio's Senders API only
+    # takes a logo_url it can fetch over HTTPS.
+    if not _LOGO.is_file():
+        raise HTTPException(status_code=404)
+    return Response(content=_LOGO.read_bytes(), media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 async def _reminder_loop():
