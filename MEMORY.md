@@ -132,6 +132,10 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
   `inbound_request_url` → Sellify `/whatsapp/webhook`
 - WhatsApp Sender `XE4e11e1b1329072d9db0df649b8dc7ebf`: webhook → Sellify `/whatsapp/webhook`.
   **The Sender-level webhook overrides the Messaging Service URL.**
+  Profile (2026-11-18, client request): logo = Cue logo via `logo_url` →
+  `/static/cue-logo.jpg` (served by `app.py`; keep the route, Twilio re-reads it); display name change
+  "Alluora" → "Cue Personal Assistant" submitted (Senders API 202), pending Meta review. Twilio has no
+  Singapore numbers to rent; a new SG number would be a SIM/eSIM registered as a sender.
 - **n8n Cue is cut off (2026-09-23, user-approved):** Event Streams subscription
   `DF21bd8006e280b0ad56063e6c60e01d39` (created by n8n's Twilio Trigger node; sink
   `DG2ed2453a79e56fe0979f0432ab54c006`; event `com.twilio.messaging.inbound-message.received`)
