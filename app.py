@@ -47,13 +47,13 @@ def _allowed_sender(phone: str) -> bool:
     return not ALLOWED_PHONES or phone in ALLOWED_PHONES or phone in BUSINESS_DATA_PHONES
 
 
-def _notify_private_once(phone: str, whatsapp_from: str) -> None:
+def _notify_private_once(phone: str, whatsapp_from: str, cue_number: str | None = None) -> None:
     now = time.time()
     if now - _private_notice_sent.get(phone, 0) < _PRIVATE_NOTICE_SECONDS:
         return
     _private_notice_sent[phone] = now
     try:
-        whatsapp.send_message(whatsapp_from, _PRIVATE_REPLY)
+        whatsapp.send_message(whatsapp_from, _PRIVATE_REPLY, from_number=cue_number)
     except Exception:
         logger.warning("Private-test notice to unknown sender failed", exc_info=True)
 _STOP_WORDS = re.compile(r"^\s*(stop|stop (the |my )?reminders?|stop reminding me)\s*[.!]*\s*$", re.IGNORECASE)
@@ -104,10 +104,12 @@ async def whatsapp_webhook(request: Request):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     whatsapp_from = form.get("From", "")
+    # Which of Cue's numbers they wrote to: replies must come from that one.
+    cue_number = form.get("To") or None
     phone = whatsapp_from.replace("whatsapp:", "")
     if not _allowed_sender(phone):
         logger.info("Dropped message from a number outside ALLOWED_PHONES")
-        asyncio.create_task(asyncio.to_thread(_notify_private_once, phone, whatsapp_from))
+        asyncio.create_task(asyncio.to_thread(_notify_private_once, phone, whatsapp_from, cue_number))
         return Response(content="", media_type="text/xml")
     message = (form.get("Body") or "").strip()
     media = [
@@ -118,7 +120,7 @@ async def whatsapp_webhook(request: Request):
 
     logger.info("Incoming from %s: %s (%d attachment(s))", phone, message[:100], len(media))
 
-    asyncio.create_task(_process_message(phone, message, whatsapp_from, media, form.get("MessageSid")))
+    asyncio.create_task(_process_message(phone, message, whatsapp_from, media, form.get("MessageSid"), cue_number))
 
     return Response(content="", media_type="text/xml")
 
@@ -238,6 +240,7 @@ async def _process_message(
     whatsapp_from: str,
     media: list[tuple[str, str]] | None = None,
     message_sid: str | None = None,
+    cue_number: str | None = None,
 ):
     message, images = await _attach_media(phone, message, media, message_sid)
     message = await _prepare_message(phone, message)
@@ -246,6 +249,12 @@ async def _process_message(
         await asyncio.to_thread(upsert_user, phone)
     except Exception:
         logger.debug("User upsert skipped (no DB)")
+
+    if cue_number:
+        try:
+            await asyncio.to_thread(db.set_cue_number, phone, cue_number)
+        except Exception:
+            logger.debug("Cue number save skipped (no DB)")
 
     try:
         await asyncio.to_thread(save_chat_message, phone, "human", message)
@@ -268,7 +277,7 @@ async def _process_message(
         logger.debug("Chat save skipped (no DB)")
 
     try:
-        await asyncio.to_thread(whatsapp.send_message, whatsapp_from, response, _own_media_urls(response))
+        await asyncio.to_thread(whatsapp.send_message, whatsapp_from, response, _own_media_urls(response), cue_number)
         logger.info("Reply sent to %s: %s", phone, response[:100])
     except Exception as e:
         logger.error("Failed to send reply to %s: %s", phone, e)
@@ -356,7 +365,11 @@ async def _deliver_reminder(reminder: dict):
         if reminder["recurrence"] != "none":
             # The way out is always in the message itself, not left to the model.
             reply += "\n\nReply *stop* to end these reminders."
-        await asyncio.to_thread(whatsapp.send_message, f"whatsapp:{phone}", reply)
+        try:
+            cue_number = await asyncio.to_thread(db.get_cue_number, phone)
+        except Exception:
+            cue_number = None
+        await asyncio.to_thread(whatsapp.send_message, f"whatsapp:{phone}", reply, None, cue_number)
     except Exception as e:
         logger.error("Reminder %s delivery failed: %s", reminder["id"], e)
         await asyncio.to_thread(db.finish_reminder, reminder["id"], None, str(e))

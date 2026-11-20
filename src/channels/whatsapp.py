@@ -39,11 +39,12 @@ class WhatsAppChannel:
             logger.warning("Typing indicator failed: %s", e)
             return False
 
-    def send_message(self, to_number: str, body: str, media_urls: list[str] | None = None):
+    def send_message(self, to_number: str, body: str, media_urls: list[str] | None = None,
+                     from_number: str | None = None):
         parts = split_message(body)
         for i, part in enumerate(parts):
             try:
-                kwargs = {"from_": self.from_number, "to": to_number, "body": part}
+                kwargs = {"from_": from_number or self.from_number, "to": to_number, "body": part}
                 if media_urls and i == 0:
                     # WhatsApp takes one media item per message.
                     kwargs["media_url"] = media_urls[:1]

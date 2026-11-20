@@ -132,6 +132,12 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
   `inbound_request_url` → Sellify `/whatsapp/webhook`
 - WhatsApp Sender `XE4e11e1b1329072d9db0df649b8dc7ebf`: webhook → Sellify `/whatsapp/webhook`.
   **The Sender-level webhook overrides the Messaging Service URL.**
+  **Second number (2026-11-20, client's pick): +1 855 222 2246** (US toll-free, Twilio `PN8c02d9718449f8cb37b007260bd044cd`,
+  USD 2.15/mo), WhatsApp Sender `XE82bea0ef26fcfa194e71b4fcd94c3818` (same WABA `883957051413875`, webhook → Cue,
+  name "Cue Personal Assistant", logo) ONLINE. Both numbers run side by side while users move over: Cue replies from the
+  number the user wrote to (webhook `To`), and remembers it as `profile._cue_number` so reminders go out from it
+  (WhatsApp rejects business-initiated messages from a number the user never wrote to). `FROM_WHATSAPP_NUMBER` is only
+  the fallback; switch it to the new number once everyone has moved.
   Profile (2026-11-18, client request): logo = Cue logo via `logo_url` →
   `/static/cue-logo.jpg` (served by `app.py`; keep the route, Twilio re-reads it); display name change
   "Alluora" → "Cue Personal Assistant" submitted (Senders API 202), pending Meta review. Twilio has no

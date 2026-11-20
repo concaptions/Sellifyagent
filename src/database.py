@@ -374,6 +374,28 @@ def set_session_id(phone: str, session_id: str) -> None:
         )
 
 
+def get_cue_number(phone: str) -> str | None:
+    """The Cue WhatsApp number this user last wrote to ("whatsapp:+…"). Cue has
+    more than one number while users move to a new one, and WhatsApp only lets
+    a business message someone from a number they have been talking to."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT profile->>'_cue_number' FROM sellify_users WHERE phone = %s", (phone,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] else None
+
+
+def set_cue_number(phone: str, cue_number: str) -> None:
+    with get_db() as conn:
+        conn.cursor().execute(
+            """INSERT INTO sellify_users (phone, profile) VALUES (%s, %s::jsonb)
+               ON CONFLICT (phone) DO UPDATE SET
+                   profile = COALESCE(sellify_users.profile, '{}'::jsonb) || EXCLUDED.profile,
+                   updated_at = NOW()""",
+            (phone, json.dumps({"_cue_number": cue_number})),
+        )
+
+
 def get_google_tokens(phone: str) -> str | None:
     """This user's Google OAuth tokens (the credentials JSON), stored under an
     underscore key so they are never surfaced as a 'fact'."""
