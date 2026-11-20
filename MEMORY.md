@@ -136,8 +136,10 @@ outright. After a commit the tool screenshots the page → `media_store` → `/m
   USD 2.15/mo), WhatsApp Sender `XE82bea0ef26fcfa194e71b4fcd94c3818` (same WABA `883957051413875`, webhook → Cue,
   name "Cue Personal Assistant", logo) ONLINE. Both numbers run side by side while users move over: Cue replies from the
   number the user wrote to (webhook `To`), and remembers it as `profile._cue_number` so reminders go out from it
-  (WhatsApp rejects business-initiated messages from a number the user never wrote to). `FROM_WHATSAPP_NUMBER` is only
-  the fallback; switch it to the new number once everyone has moved.
+  (WhatsApp rejects business-initiated messages from a number the user never wrote to). Live-verified 2026-11-20 (reply
+  from the new number, status read). **Default since 2026-11-20: `FROM_WHATSAPP_NUMBER=whatsapp:+18552222246`**; before
+  the switch every existing user (31) was pinned to `_cue_number` = the +65 number, so they stay on it until they write
+  to the new one. New users get the number they first write to.
   Profile (2026-11-18, client request): logo = Cue logo via `logo_url` →
   `/static/cue-logo.jpg` (served by `app.py`; keep the route, Twilio re-reads it); display name change
   "Alluora" → "Cue Personal Assistant" submitted (Senders API 202), pending Meta review. Twilio has no
